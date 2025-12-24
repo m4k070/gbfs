@@ -1,0 +1,4 @@
+== 概要
+
+GameBoy Emulator written by F#
+
