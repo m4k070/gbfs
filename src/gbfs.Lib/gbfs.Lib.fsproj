@@ -8,7 +8,6 @@
   <ItemGroup>
     <Compile Include="Cpu.fs" />
     <Compile Include="Memory.fs" />
-    <Compile Include="Library.fs" />
   </ItemGroup>
 
 </Project>
