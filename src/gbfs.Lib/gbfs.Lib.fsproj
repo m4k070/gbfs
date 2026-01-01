@@ -6,8 +6,9 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Include="Cpu.fs" />
     <Compile Include="Memory.fs" />
+    <Compile Include="Cpu.fs" />
+    <Compile Include="Decoder.fs" />
   </ItemGroup>
 
 </Project>
