@@ -132,7 +132,7 @@ module Ppu =
 
                     let colorBit1 = (byte1 >>> xPixel) &&& 1uy
                     let colorBit2 = (byte2 >>> xPixel) &&& 1uy
-                    let colorId = (colorBit2 <<< 1uy) ||| colorBit1
+                    let colorId = (colorBit2 <<< 1) ||| colorBit1
 
                     // Color ID 0 is transparent for sprites
                     if colorId <> 0uy then
@@ -158,13 +158,6 @@ module Ppu =
                             newFrameBuffer.[fbIndex] <- color
         
         { ppuState with FrameBuffer = newFrameBuffer }
-
-    let private shouldDrawSpritePixel (sprite: Sprite) (currentBgPixel: byte) : bool =
-        if sprite.Priority = 1uy then // Sprite behind BG/Window
-            // Only draw sprite pixel if BG pixel is color 0 (transparent)
-            currentBgPixel = 0uy // Assuming 0 is the "transparent" BG color
-        else // Sprite above BG/Window
-            true
 
     /// Renders a single scanline to the framebuffer.
     let private renderScanline (ppuState: PpuState) (mem: Memory.MemoryBus) : PpuState =
@@ -203,7 +196,7 @@ module Ppu =
                 currentPpuState.LY >= wy &&
                 x >= actualWx &&
                 actualWx < 160 && // Window must be at least partially on screen horizontally
-                wy < 144 // Window must be at least partially on screen vertically
+                wy < 144uy // Window must be at least partially on screen vertically
 
             if isInWindow then
                 // --- Render Window Pixel ---
@@ -230,10 +223,10 @@ module Ppu =
                 let byte1 = Memory.read tileRowAddr mem
                 let byte2 = Memory.read (tileRowAddr + 1us) mem
 
-                let pixelXInTile = byte (7 - (int (windowPixelX % 8us)))
+                let pixelXInTile = 7 - (windowPixelX % 8)
                 let colorBit1 = (byte1 >>> pixelXInTile) &&& 1uy
                 let colorBit2 = (byte2 >>> pixelXInTile) &&& 1uy
-                let colorId = (colorBit2 <<< 1uy) ||| colorBit1
+                let colorId = (colorBit2 <<< 1) ||| colorBit1
 
                 color <-
                     match colorId with
@@ -273,10 +266,10 @@ module Ppu =
                 let byte1 = Memory.read tileRowAddr mem
                 let byte2 = Memory.read (tileRowAddr + 1us) mem
 
-                let pixelXInTile = byte (7 - (int (mapX % 8us)))
+                let pixelXInTile = 7 - (int (mapX % 8us))
                 let colorBit1 = (byte1 >>> pixelXInTile) &&& 1uy
                 let colorBit2 = (byte2 >>> pixelXInTile) &&& 1uy
-                let colorId = (colorBit2 <<< 1uy) ||| colorBit1
+                let colorId = (colorBit2 <<< 1) ||| colorBit1
 
                 color <-
                     match colorId with

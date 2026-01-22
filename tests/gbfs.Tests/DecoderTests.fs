@@ -304,3 +304,161 @@ module DecodeSequenceTests =
         testInstruction memory state (fun finalState ->
             Assert.Equal(3us, finalState.Regs.PC)
         )
+
+// ====================
+// Interrupt Dispatch Tests
+// ====================
+
+module InterruptDispatchTests =
+    let IE_ADDR = 0xFFFFus
+    let IF_ADDR = 0xFF0Fus
+
+    /// Creates a state with interrupt settings
+    let setupInterruptState (ie: byte) (ifReg: byte) (ime: bool) =
+        let state = initCpuState()
+        let mem = write IE_ADDR ie state.Mem
+        let mem = write IF_ADDR ifReg mem
+        { state with Mem = mem; Ime = ime }
+
+    [<Fact>]
+    let ``VBlank interrupt is dispatched when IME=true and IE/IF bit 0 set`` () =
+        // Setup: PC=0x0100, IME=true, IE=0x01, IF=0x01 (VBlank)
+        let state = setupInterruptState 0x01uy 0x01uy true
+        let state = { state with Regs = { state.Regs with PC = 0x0100us; SP = 0xFFFEus } }
+
+        // Put some code at 0x0100 (should not execute due to interrupt)
+        let rom = Array.zeroCreate 0x200
+        let state = loadRomToState rom state
+
+        let finalState = step state
+
+        // Should jump to VBlank vector 0x0040
+        Assert.Equal(0x0040us, finalState.Regs.PC)
+        // SP should be decremented by 2
+        Assert.Equal(0xFFFCus, finalState.Regs.SP)
+        // IME should be false
+        Assert.False(finalState.Ime)
+        // IF bit 0 should be cleared
+        let ifReg = read IF_ADDR finalState.Mem
+        Assert.Equal(0x00uy, ifReg &&& 0x01uy)
+
+    [<Fact>]
+    let ``LCD STAT interrupt is dispatched when IME=true and IE/IF bit 1 set`` () =
+        let state = setupInterruptState 0x02uy 0x02uy true
+        let state = { state with Regs = { state.Regs with PC = 0x0100us; SP = 0xFFFEus } }
+        let rom = Array.zeroCreate 0x200
+        let state = loadRomToState rom state
+
+        let finalState = step state
+
+        // Should jump to LCD STAT vector 0x0048
+        Assert.Equal(0x0048us, finalState.Regs.PC)
+        Assert.False(finalState.Ime)
+
+    [<Fact>]
+    let ``Timer interrupt is dispatched when IME=true and IE/IF bit 2 set`` () =
+        let state = setupInterruptState 0x04uy 0x04uy true
+        let state = { state with Regs = { state.Regs with PC = 0x0100us; SP = 0xFFFEus } }
+        let rom = Array.zeroCreate 0x200
+        let state = loadRomToState rom state
+
+        let finalState = step state
+
+        // Should jump to Timer vector 0x0050
+        Assert.Equal(0x0050us, finalState.Regs.PC)
+
+    [<Fact>]
+    let ``No interrupt when IME=false`` () =
+        // Setup: IME=false, IE=0x01, IF=0x01
+        let state = setupInterruptState 0x01uy 0x01uy false
+        let state = { state with Regs = { state.Regs with PC = 0us; SP = 0xFFFEus } }
+
+        // Put NOP at 0x0000
+        let rom = [| 0x00uy |]
+        let state = loadRomToState rom state
+
+        let finalState = step state
+
+        // Should execute NOP, not jump to interrupt
+        Assert.Equal(1us, finalState.Regs.PC)
+        Assert.Equal(0xFFFEus, finalState.Regs.SP)
+
+    [<Fact>]
+    let ``No interrupt when IE and IF don't overlap`` () =
+        // Setup: IME=true, IE=0x01 (VBlank), IF=0x02 (LCD STAT)
+        let state = setupInterruptState 0x01uy 0x02uy true
+        let state = { state with Regs = { state.Regs with PC = 0us; SP = 0xFFFEus } }
+
+        let rom = [| 0x00uy |] // NOP
+        let state = loadRomToState rom state
+
+        let finalState = step state
+
+        // Should execute NOP, not jump to interrupt
+        Assert.Equal(1us, finalState.Regs.PC)
+
+    [<Fact>]
+    let ``Higher priority interrupt is handled first`` () =
+        // Setup: IME=true, IE=0x03 (VBlank + LCD STAT), IF=0x03 (both pending)
+        let state = setupInterruptState 0x03uy 0x03uy true
+        let state = { state with Regs = { state.Regs with PC = 0x0100us; SP = 0xFFFEus } }
+        let rom = Array.zeroCreate 0x200
+        let state = loadRomToState rom state
+
+        let finalState = step state
+
+        // Should jump to VBlank (higher priority) vector 0x0040
+        Assert.Equal(0x0040us, finalState.Regs.PC)
+        // Only VBlank flag should be cleared
+        let ifReg = read IF_ADDR finalState.Mem
+        Assert.Equal(0x02uy, ifReg) // LCD STAT still pending
+
+    [<Fact>]
+    let ``HALT wakes up on interrupt with IME=true`` () =
+        let state = setupInterruptState 0x01uy 0x01uy true
+        let state = { state with
+                        Regs = { state.Regs with PC = 0x0100us; SP = 0xFFFEus }
+                        Halted = true }
+        let rom = Array.zeroCreate 0x200
+        let state = loadRomToState rom state
+
+        let finalState = step state
+
+        // Should wake from HALT and dispatch interrupt
+        Assert.False(finalState.Halted)
+        Assert.Equal(0x0040us, finalState.Regs.PC)
+
+    [<Fact>]
+    let ``HALT wakes up on interrupt with IME=false but continues execution`` () =
+        let state = setupInterruptState 0x01uy 0x01uy false
+        let state = { state with
+                        Regs = { state.Regs with PC = 0us; SP = 0xFFFEus }
+                        Halted = true }
+
+        // Put NOP at 0x0000
+        let rom = [| 0x00uy |]
+        let state = loadRomToState rom state
+
+        let finalState = step state
+
+        // Should wake from HALT but not dispatch interrupt (IME=false)
+        Assert.False(finalState.Halted)
+        // Should execute instruction at PC (NOP)
+        Assert.Equal(1us, finalState.Regs.PC)
+        // SP unchanged (no interrupt)
+        Assert.Equal(0xFFFEus, finalState.Regs.SP)
+
+    [<Fact>]
+    let ``Return address is pushed correctly during interrupt`` () =
+        let state = setupInterruptState 0x01uy 0x01uy true
+        let state = { state with Regs = { state.Regs with PC = 0x1234us; SP = 0xFFFEus } }
+        let rom = Array.zeroCreate 0x2000
+        let state = loadRomToState rom state
+
+        let finalState = step state
+
+        // Return address (0x1234) should be pushed to stack
+        let lowByte = read 0xFFFCus finalState.Mem
+        let highByte = read 0xFFFDus finalState.Mem
+        let returnAddr = uint16 lowByte ||| (uint16 highByte <<< 8)
+        Assert.Equal(0x1234us, returnAddr)

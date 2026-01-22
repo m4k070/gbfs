@@ -1,132 +1,197 @@
 module gbfs.Client.Main
 
+open System
 open Bolero
 open Bolero.Html
 open Elmish
-open Fable.Core.JS
-open Fable.Web.Dom
+open Microsoft.JSInterop
+open Microsoft.AspNetCore.Components
+open Microsoft.AspNetCore.Components.Web
 open gbfs.Lib
-
-// JS interop to draw the screen
-promise {
-    let screen = import "drawScreen" "./js/app.js"
-    (window :?> obj)?drawScreen <- screen
-} |> ignore
-
-let drawScreen (data: byte[]) =
-    ((window :?> obj)?drawScreen :?> (byte[] -> unit)) data
 
 // ====================
 // The Elmish Application
 // ====================
 
 type Model = {
-    emulatorState: Decoder.CpuState
-    romLoaded: bool
-    error: string option
+    EmulatorState: Decoder.CpuState
+    RomLoaded: bool
+    Running: bool
+    Error: string option
+    FrameCount: int
 }
 
 type Message =
-    | FileSelected of File
+    | LoadRomClicked
     | RomLoaded of byte[]
-    | RunEmulator
-    | ShowError of string
+    | StartEmulator
+    | StopEmulator
+    | RunFrame
+    | SetError of string
+    | Reset
 
-let readFileAsync (file: File) : Async<byte[]> =
-    async {
-        let! buffer = (file.As<Blob>()).arrayBuffer() |> Promise.toAsync
-        let view = new Uint8Array(buffer)
-        return Array.ofTypedArray view
-    }
-
-let init (): Model * Cmd<Message> =
+let init () : Model * Cmd<Message> =
     {
-        emulatorState = Decoder.createState()
-        romLoaded = false
-        error = None
+        EmulatorState = Decoder.createState()
+        RomLoaded = false
+        Running = false
+        Error = None
+        FrameCount = 0
     }, Cmd.none
 
-let update (msg: Message) (model: Model): Model * Cmd<Message> =
+let update (jsRuntime: IJSRuntime) (msg: Message) (model: Model) : Model * Cmd<Message> =
     match msg with
-    | FileSelected file ->
-        let cmd = Cmd.OfAsync.perform readFileAsync file RomLoaded (fun ex -> ShowError ex.Message)
-        model, cmd
+    | LoadRomClicked ->
+        let loadRomTask = async {
+            let! hasFile = jsRuntime.InvokeAsync<bool>("hasFileSelected").AsTask() |> Async.AwaitTask
+            if not hasFile then
+                return SetError "Please select a ROM file first"
+            else
+                let! base64Data = jsRuntime.InvokeAsync<string>("readRomFile").AsTask() |> Async.AwaitTask
+                let romData = Convert.FromBase64String(base64Data)
+                return RomLoaded romData
+        }
+        model, Cmd.OfAsync.perform (fun () -> loadRomTask) () id
 
     | RomLoaded rom ->
-        let newState = Decoder.loadRomToState rom model.emulatorState
-        { model with emulatorState = newState; romLoaded = true; error = None }, Cmd.ofMsg RunEmulator
+        let newState = Decoder.loadRomToState rom model.EmulatorState
+        { model with EmulatorState = newState; RomLoaded = true; Running = true; Error = None; FrameCount = 0 }, Cmd.ofMsg RunFrame
 
-    | RunEmulator ->
-        if model.romLoaded then
-            // Schedule the next frame
-            let cmd = Cmd.ofSub (fun dispatch -> window.requestAnimationFrame (fun _ -> dispatch RunEmulator) |> ignore)
-            
-            // Run the emulator for one frame's worth of cycles
-            // Clock speed is 4.194304 MHz. Screen refresh is 59.7 Hz.
-            // Cycles per frame = 4194304 / 59.7 ~= 70224
-            let cyclesPerFrame = 70224
-            let newState = Decoder.run cyclesPerFrame model.emulatorState
-
-            // Draw the result
-            drawScreen newState.Ppu.FrameBuffer
-            
-            { model with emulatorState = newState }, cmd
+    | StartEmulator ->
+        if model.RomLoaded then
+            { model with Running = true }, Cmd.ofMsg RunFrame
         else
             model, Cmd.none
 
-    | ShowError msg ->
-        { model with error = Some msg }, Cmd.none
+    | StopEmulator ->
+        { model with Running = false }, Cmd.none
 
+    | Reset ->
+        { model with
+            EmulatorState = Decoder.createState()
+            RomLoaded = false
+            Running = false
+            Error = None
+            FrameCount = 0 }, Cmd.none
+
+    | RunFrame ->
+        if model.Running && model.RomLoaded then
+            let cyclesPerFrame = 70224
+            let newState = Decoder.run cyclesPerFrame model.EmulatorState
+
+            let drawTask = async {
+                do! jsRuntime.InvokeVoidAsync("drawScreen", newState.Ppu.FrameBuffer).AsTask() |> Async.AwaitTask
+            }
+            let drawCmd = Cmd.OfAsync.attempt (fun () -> drawTask) () (fun ex -> SetError ex.Message)
+            let continueCmd = Cmd.ofMsg RunFrame
+
+            { model with EmulatorState = newState; FrameCount = model.FrameCount + 1 }, Cmd.batch [drawCmd; continueCmd]
+        else
+            model, Cmd.none
+
+    | SetError msg ->
+        { model with Error = Some msg; Running = false }, Cmd.none
 
 let view (model: Model) (dispatch: Message -> unit) =
     div {
-        h1 { "gbfs - Game Boy Emulator" }
+        attr.style "font-family: sans-serif; padding: 20px; max-width: 600px; margin: 0 auto;"
+
+        h1 {
+            attr.style "color: #2c3e50; margin-bottom: 20px; text-align: center;"
+            "gbfs - Game Boy Emulator"
+        }
+
         div {
-            style {
-                display "flex"
-                flexDirection "column"
-                alignItems "flex-start"
-            }
-            
+            attr.style "display: flex; flex-direction: column; align-items: center; gap: 15px;"
+
+            // File input for ROM loading
             div {
-                style { marginBottom "10px" }
-                label { "Load ROM:" }
+                attr.style "display: flex; align-items: center; gap: 10px;"
+                label {
+                    attr.``for`` "rom-input"
+                    attr.style "font-weight: bold;"
+                    "ROM File: "
+                }
                 input {
+                    attr.id "rom-input"
                     attr.``type`` "file"
-                    on.change (fun ev ->
-                        let files = (ev.target :?> HTMLInputElement).files
-                        if files.length > 0 then
-                            dispatch (FileSelected files.[0]))
+                    attr.accept ".gb,.gbc,.bin"
+                    attr.style "padding: 5px;"
                 }
             }
 
-            canvas {
-                attr.id "emulator-screen"
-                attr.width 160
-                attr.height 144
-                style {
-                    border "1px solid black"
-                    width "320px"  // Scale up for better viewing
-                    height "288px"
-                    imageRendering "pixelated" // Crisp pixels
+            // Control buttons
+            div {
+                attr.style "display: flex; gap: 10px;"
+
+                button {
+                    attr.style "padding: 10px 20px; font-size: 14px; cursor: pointer; background: #3498db; color: white; border: none; border-radius: 5px;"
+                    on.click (fun _ -> dispatch LoadRomClicked)
+                    "Load ROM"
+                }
+                button {
+                    attr.disabled (not model.RomLoaded || model.Running)
+                    attr.style "padding: 10px 20px; font-size: 14px; cursor: pointer; background: #27ae60; color: white; border: none; border-radius: 5px;"
+                    on.click (fun _ -> dispatch StartEmulator)
+                    "Start"
+                }
+                button {
+                    attr.disabled (not model.Running)
+                    attr.style "padding: 10px 20px; font-size: 14px; cursor: pointer; background: #e74c3c; color: white; border: none; border-radius: 5px;"
+                    on.click (fun _ -> dispatch StopEmulator)
+                    "Stop"
+                }
+                button {
+                    attr.style "padding: 10px 20px; font-size: 14px; cursor: pointer; background: #95a5a6; color: white; border: none; border-radius: 5px;"
+                    on.click (fun _ -> dispatch Reset)
+                    "Reset"
                 }
             }
+
+            // Canvas for emulator display
+            div {
+                attr.style "border: 4px solid #2c3e50; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.1);"
+                canvas {
+                    attr.id "emulator-screen"
+                    attr.width 160
+                    attr.height 144
+                    attr.style "display: block; width: 320px; height: 288px; image-rendering: pixelated; background: #9bbc0f;"
+                }
+            }
+
+            // Status
+            div {
+                attr.style "font-size: 14px; color: #7f8c8d; text-align: center;"
+                if model.RomLoaded then
+                    if model.Running then
+                        text $"Status: Running (Frame: {model.FrameCount})"
+                    else
+                        text "Status: ROM loaded, press Start to begin"
+                else
+                    text "Status: Select a ROM file and click Load ROM"
+            }
+
+            // Error display
+            cond model.Error <| function
+                | Some err ->
+                    div {
+                        attr.style "color: #e74c3c; margin-top: 10px; padding: 10px; background: #fde8e8; border-radius: 5px;"
+                        text $"Error: {err}"
+                    }
+                | None -> empty()
         }
-        
-        match model.error with
-        | Some err -> div { style { color "red"; marginTop "10px" }; str err }
-        | None -> empty()
     }
 
 // ====================
-// Bolero Setup
+// Bolero Component
 // ====================
 
-type MyApp() =
+type EmulatorApp() =
     inherit ProgramComponent<Model, Message>()
+
+    [<Inject>]
+    member val JSRuntime: IJSRuntime = Unchecked.defaultof<_> with get, set
+
     override this.Program =
-        Program.mkProgram init update view
-        |> Program.withJsInterop
-#if DEBUG
-        |> Program.withHotReload
-#endif
+        let update = update this.JSRuntime
+        Program.mkProgram (fun _ -> init()) update view

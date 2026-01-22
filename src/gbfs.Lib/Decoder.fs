@@ -340,21 +340,77 @@ module Decoder =
       | _ -> (state, 4) // Unknown CB opcode
 
   // ====================
-  // Single Step Execution
+  // Interrupt Handling
   // ====================
 
-  let step (state: CpuState) : CpuState =
-    if state.Halted then
-      // Halted状態でもPPUは動作し続ける
-      let (ppu, mem) = Ppu.step 4 state.Ppu state.Mem
-      { state with Ppu = ppu; Mem = mem }
-    else
-      let opcode = readByte state.Regs.PC state
+  // Interrupt Enable register (0xFFFF) and Interrupt Flag register (0xFF0F)
+  let private IE_ADDR = 0xFFFFus
+  let private IF_ADDR = 0xFF0Fus
 
-      // 命令の実行とサイクル計算
-      let (newState, cycles) =
-        match opcode with
-        | Nop -> (advancePc 1 state, 4)
+  // Interrupt vectors
+  let private VBLANK_VECTOR = 0x0040us
+  let private LCD_STAT_VECTOR = 0x0048us
+  let private TIMER_VECTOR = 0x0050us
+  let private SERIAL_VECTOR = 0x0058us
+  let private JOYPAD_VECTOR = 0x0060us
+
+  /// Checks if any interrupt is pending (IE & IF)
+  let private getPendingInterrupts (state: CpuState) : byte =
+    let ie = readByte IE_ADDR state
+    let ifReg = readByte IF_ADDR state
+    ie &&& ifReg &&& 0x1Fuy // Only bits 0-4 are valid
+
+  /// Handles interrupt dispatch. Returns the new state and cycles consumed.
+  /// If no interrupt is handled, returns None.
+  let private handleInterrupt (state: CpuState) : (CpuState * int) option =
+    if not state.Ime then
+      None
+    else
+      let pending = getPendingInterrupts state
+      if pending = 0uy then
+        None
+      else
+        // Find the highest priority interrupt (lowest bit number)
+        let (interruptBit, vector) =
+          if (pending &&& 0x01uy) <> 0uy then (0, VBLANK_VECTOR)
+          elif (pending &&& 0x02uy) <> 0uy then (1, LCD_STAT_VECTOR)
+          elif (pending &&& 0x04uy) <> 0uy then (2, TIMER_VECTOR)
+          elif (pending &&& 0x08uy) <> 0uy then (3, SERIAL_VECTOR)
+          else (4, JOYPAD_VECTOR)
+
+        // Clear the interrupt flag
+        let ifReg = readByte IF_ADDR state
+        let newIfReg = ifReg &&& ~~~(1uy <<< interruptBit)
+        let stateWithClearedIF = { state with Mem = Memory.write IF_ADDR newIfReg state.Mem }
+
+        // Push PC to stack and jump to interrupt vector
+        let currentPC = stateWithClearedIF.Regs.PC
+        let newSP = stateWithClearedIF.Regs.SP - 2us
+        let stateWithNewSP = { stateWithClearedIF with Regs = { stateWithClearedIF.Regs with SP = newSP } }
+        let stateWithPushedPC = write16 newSP currentPC stateWithNewSP
+
+        // Jump to interrupt vector and disable IME
+        let finalState = {
+          stateWithPushedPC with
+            Regs = { stateWithPushedPC.Regs with PC = vector }
+            Ime = false
+            Halted = false // Wake from HALT
+        }
+
+        Some (finalState, 20) // Interrupt handling takes 20 cycles
+
+  // ====================
+  // Instruction Execution
+  // ====================
+
+  /// Executes a single instruction and returns the new state with PPU updated
+  let private executeInstruction (state: CpuState) : CpuState =
+    let opcode = readByte state.Regs.PC state
+
+    // 命令の実行とサイクル計算
+    let (newState, cycles) =
+      match opcode with
+      | Nop -> (advancePc 1 state, 4)
         | Halt -> ({ (advancePc 1 state) with Halted = true }, 4)
         | CBPrefixed ->
             let stateAfterPC = advancePc 1 state
@@ -818,9 +874,48 @@ module Decoder =
           // eprintfn "Unimplemented opcode: 0x%02X at 0x%04X" opcode state.Regs.PC
           (advancePc 1 state, 4) // Default for unimplemented
 
-      // PPUをCPUサイクル分進める
-      let (ppu, mem) = Ppu.step cycles newState.Ppu newState.Mem
-      { newState with Ppu = ppu; Mem = mem }
+    // PPUをCPUサイクル分進める
+    let (ppu, mem) = Ppu.step cycles newState.Ppu newState.Mem
+    { newState with Ppu = ppu; Mem = mem }
+
+  // ====================
+  // Single Step with Interrupt Handling
+  // ====================
+
+  /// Executes a single step: handles interrupts, HALT state, and instruction execution
+  let step (state: CpuState) : CpuState =
+    // First, check for pending interrupts
+    let pending = getPendingInterrupts state
+
+    // Handle HALT state
+    if state.Halted then
+      // Check if we should wake from HALT
+      if pending <> 0uy then
+        // Wake from HALT
+        let wokenState = { state with Halted = false }
+        // Try to handle interrupt if IME is set
+        match handleInterrupt wokenState with
+        | Some (interruptedState, cycles) ->
+            // PPUをサイクル分進める
+            let (ppu, mem) = Ppu.step cycles interruptedState.Ppu interruptedState.Mem
+            { interruptedState with Ppu = ppu; Mem = mem }
+        | None ->
+            // IME is false, but we still wake from HALT and continue execution
+            executeInstruction wokenState
+      else
+        // Still halted, just advance PPU
+        let (ppu, mem) = Ppu.step 4 state.Ppu state.Mem
+        { state with Ppu = ppu; Mem = mem }
+    else
+      // Not halted - check for interrupts first
+      match handleInterrupt state with
+      | Some (interruptedState, cycles) ->
+          // PPUをサイクル分進める
+          let (ppu, mem) = Ppu.step cycles interruptedState.Ppu interruptedState.Mem
+          { interruptedState with Ppu = ppu; Mem = mem }
+      | None ->
+          // No interrupt, execute normal instruction
+          executeInstruction state
 
   // Run until halted or max steps
   let run maxSteps (state: CpuState) =
