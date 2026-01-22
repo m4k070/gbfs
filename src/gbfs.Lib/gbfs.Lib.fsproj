@@ -7,7 +7,9 @@
 
   <ItemGroup>
     <Compile Include="Memory.fs" />
+    <Compile Include="Ppu.fs" />
     <Compile Include="Cpu.fs" />
+    <Compile Include="CBPrefix.fs" />
     <Compile Include="Decoder.fs" />
   </ItemGroup>
 

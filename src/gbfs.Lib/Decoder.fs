@@ -2,6 +2,8 @@ namespace gbfs.Lib
 
 open Cpu
 open Memory
+open CBPrefix
+open Ppu
 
 module Decoder =
   // オペコードのビット列(0-7)に対応するレジスタの定義
@@ -46,6 +48,10 @@ module Decoder =
   // HALT (0x76)
   let (|Halt|_|) (opcode: uint8) =
     if opcode = 0x76uy then Some() else None
+  
+  // CB Prefixed instruction
+  let (|CBPrefixed|_|) (opcode: uint8) =
+    if opcode = 0xCBuy then Some() else None
 
   // 8bitロード命令: LD r, r' (0x40 - 0x7F, ただし 0x76(HALT)を除く)
   let (|LdRR|_|) (opcode: uint8) =
@@ -216,6 +222,7 @@ module Decoder =
   type CpuState = {
     Regs: Register
     Mem: MemoryBus
+    Ppu: PpuState
     Ime: bool  // Interrupt Master Enable
     Halted: bool
   }
@@ -223,6 +230,7 @@ module Decoder =
   let createState () = {
     Regs = Cpu.initRegister()
     Mem = Memory.create()
+    Ppu = Ppu.create()
     Ime = false
     Halted = false
   }
@@ -250,447 +258,569 @@ module Decoder =
     let value = read16 state.Regs.PC state
     (value, advancePc 2 state)
 
+  // Placeholder for instruction cycle counts
+  let getInstructionCycles opcode =
+    // TODO: Implement accurate cycle counts for each instruction.
+    4
+
+  // ====================
+  // CB-Prefixed Execution
+  // ====================
+  
+  // CB Active Patterns
+  let (|CbRlc|_|) (op: byte) = if op <= 0x07uy then Some(int op &&& 0x7) else None
+  let (|CbRrc|_|) (op: byte) = if op >= 0x08uy && op <= 0x0Fuy then Some(int op &&& 0x7) else None
+  let (|CbRl|_|) (op: byte) = if op >= 0x10uy && op <= 0x17uy then Some(int op &&& 0x7) else None
+  let (|CbRr|_|) (op: byte) = if op >= 0x18uy && op <= 0x1Fuy then Some(int op &&& 0x7) else None
+  let (|CbSla|_|) (op: byte) = if op >= 0x20uy && op <= 0x27uy then Some(int op &&& 0x7) else None
+  let (|CbSra|_|) (op: byte) = if op >= 0x28uy && op <= 0x2Fuy then Some(int op &&& 0x7) else None
+  let (|CbSwap|_|) (op: byte) = if op >= 0x30uy && op <= 0x37uy then Some(int op &&& 0x7) else None
+  let (|CbSrl|_|) (op: byte) = if op >= 0x38uy && op <= 0x3Fuy then Some(int op &&& 0x7) else None
+  let (|CbBit|_|) (op: byte) = if op >= 0x40uy && op <= 0x7Fuy then let bit = (int op >>> 3) &&& 0x7 in let regIdx = int op &&& 0x7 in Some(bit, regIdx) else None
+  let (|CbRes|_|) (op: byte) = if op >= 0x80uy && op <= 0xBFuy then let bit = (int op >>> 3) &&& 0x7 in let regIdx = int op &&& 0x7 in Some(bit, regIdx) else None
+  let (|CbSet|_|) (op: byte) = if op >= 0xC0uy && op <= 0xFFuy then let bit = (int op >>> 3) &&& 0x7 in let regIdx = int op &&& 0x7 in Some(bit, regIdx) else None
+
+  let stepCb (state: CpuState) : CpuState * int =
+      let (opcode, state) = fetchByte state
+
+      // Helper function to apply a CB operation (that returns a new value and regs) to a register or memory
+      let apply (op: uint16 -> Register -> (uint16 * Register)) regIdx state =
+          if regIdx = 6 then // (HL)
+              let addr = Cpu.getRegisterValue (R16 HL) state.Regs
+              let value = uint16 (readByte addr state)
+              let (result, newRegs) = op value state.Regs
+              let newState = writeByte addr (byte result) { state with Regs = newRegs }
+              (newState, 16) // (HL) ops take more cycles
+          else
+              let reg = match r8map.[regIdx] with R8 r -> r | _ -> failwith "Invalid register for CB op"
+              let value = Cpu.getRegisterValue (R8 reg) state.Regs
+              let (result, newRegs) = op value state.Regs
+              let newState = setRegs (Cpu.setRegisterValue (R8 reg) result newRegs) state
+              (newState, 8)
+
+      // Helper function to apply a "pure" CB operation (that only returns a new value) to a register or memory
+      let applyPure (op: uint16 -> uint16) regIdx state =
+          if regIdx = 6 then // (HL)
+              let addr = Cpu.getRegisterValue (R16 HL) state.Regs
+              let value = uint16 (readByte addr state)
+              let result = op value
+              let newState = writeByte addr (byte result) state
+              (newState, 16)
+          else
+              let reg = match r8map.[regIdx] with R8 r -> r | _ -> failwith "Invalid register for CB op"
+              let value = Cpu.getRegisterValue (R8 reg) state.Regs
+              let result = op value
+              let newState = setRegs (Cpu.setRegisterValue (R8 reg) result state.Regs) state
+              (newState, 8)
+
+      match opcode with
+      | CbRlc regIdx  -> apply Rlc regIdx state
+      | CbRrc regIdx  -> apply Rrc regIdx state
+      | CbRl regIdx   -> apply Rl regIdx state
+      | CbRr regIdx   -> apply Rr regIdx state
+      | CbSla regIdx  -> apply Sla regIdx state
+      | CbSra regIdx  -> apply Sra regIdx state
+      | CbSwap regIdx -> apply Swap regIdx state
+      | CbSrl regIdx  -> apply Srl regIdx state
+      | CbBit (bit, regIdx) ->
+          let cycles =
+              if regIdx = 6 then // BIT n,(HL)
+                  let addr = Cpu.getRegisterValue (R16 HL) state.Regs
+                  let value = uint16 (readByte addr state)
+                  let newState = setRegs (Bit bit value state.Regs) state
+                  (newState, 12)
+              else
+                  let reg = match r8map.[regIdx] with R8 r -> r | _ -> failwith "Invalid register for BIT"
+                  let value = Cpu.getRegisterValue (R8 reg) state.Regs
+                  let newState = setRegs (Bit bit value state.Regs) state
+                  (newState, 8)
+          cycles
+      | CbRes (bit, regIdx) -> applyPure (Res bit) regIdx state
+      | CbSet (bit, regIdx) -> applyPure (Set bit) regIdx state
+      | _ -> (state, 4) // Unknown CB opcode
+
   // ====================
   // Single Step Execution
   // ====================
 
   let step (state: CpuState) : CpuState =
-    if state.Halted then state
+    if state.Halted then
+      // Halted状態でもPPUは動作し続ける
+      let (ppu, mem) = Ppu.step 4 state.Ppu state.Mem
+      { state with Ppu = ppu; Mem = mem }
     else
       let opcode = readByte state.Regs.PC state
-      let state = advancePc 1 state
-
-      match opcode with
-      | Nop -> state
-
-      | Halt -> { state with Halted = true }
-
-      // 8-bit Load: LD r,r'
-      | LdRR (dst_idx, src_idx) ->
-        if dst_idx = 6 && src_idx = 6 then
-          // LD (HL),(HL) is HALT - already handled above
-          state
-        elif dst_idx = 6 then
-          // LD (HL),r
-          let srcReg = match r8map.[src_idx] with R8 r -> r | _ -> A
-          let value = Cpu.getRegisterValue (R8 srcReg) state.Regs
-          let addr = Cpu.getRegisterValue (R16 HL) state.Regs
-          writeByte addr (byte value) state
-        elif src_idx = 6 then
-          // LD r,(HL)
-          let dstReg = match r8map.[dst_idx] with R8 r -> r | _ -> A
-          let addr = Cpu.getRegisterValue (R16 HL) state.Regs
-          let value = readByte addr state
-          setRegs (Cpu.LoadN8 dstReg (uint16 value) state.Regs) state
-        else
-          // LD r,r'
-          let dstReg = match r8map.[dst_idx] with R8 r -> r | _ -> A
-          let srcReg = match r8map.[src_idx] with R8 r -> r | _ -> A
-          setRegs (Cpu.LoadR dstReg srcReg state.Regs) state
-
-      // LD r,n8
-      | LdRN8 dst_idx ->
-        let (imm, state) = fetchByte state
-        if dst_idx = 6 then
-          // LD (HL),n8
-          let addr = Cpu.getRegisterValue (R16 HL) state.Regs
-          writeByte addr imm state
-        else
-          let dstReg = match r8map.[dst_idx] with R8 r -> r | _ -> A
-          setRegs (Cpu.LoadN8 dstReg (uint16 imm) state.Regs) state
-
-      // LD r16,n16
-      | LdHImm16 dst ->
-        let (imm, state) = fetch16 state
-        setRegs (Cpu.LoadN16 dst imm state.Regs) state
-
-      // Memory load instructions
-      | LdABC ->
-        let addr = Cpu.getRegisterValue (R16 BC) state.Regs
-        let value = readByte addr state
-        setRegs (Cpu.LoadN8 A (uint16 value) state.Regs) state
-
-      | LdADE ->
-        let addr = Cpu.getRegisterValue (R16 DE) state.Regs
-        let value = readByte addr state
-        setRegs (Cpu.LoadN8 A (uint16 value) state.Regs) state
-
-      | LdBCA ->
-        let addr = Cpu.getRegisterValue (R16 BC) state.Regs
-        let value = Cpu.getRegisterValue (R8 A) state.Regs
-        writeByte addr (byte value) state
-
-      | LdDEA ->
-        let addr = Cpu.getRegisterValue (R16 DE) state.Regs
-        let value = Cpu.getRegisterValue (R8 A) state.Regs
-        writeByte addr (byte value) state
-
-      | LdAHLI ->
-        let addr = Cpu.getRegisterValue (R16 HL) state.Regs
-        let value = readByte addr state
-        let regs = Cpu.LoadN8 A (uint16 value) state.Regs |> Cpu.Inc16 HL
-        setRegs regs state
-
-      | LdAHLD ->
-        let addr = Cpu.getRegisterValue (R16 HL) state.Regs
-        let value = readByte addr state
-        let regs = Cpu.LoadN8 A (uint16 value) state.Regs |> Cpu.Dec16 HL
-        setRegs regs state
-
-      | LdHLIA ->
-        let addr = Cpu.getRegisterValue (R16 HL) state.Regs
-        let value = Cpu.getRegisterValue (R8 A) state.Regs
-        let state = writeByte addr (byte value) state
-        setRegs (Cpu.Inc16 HL state.Regs) state
-
-      | LdHLDA ->
-        let addr = Cpu.getRegisterValue (R16 HL) state.Regs
-        let value = Cpu.getRegisterValue (R8 A) state.Regs
-        let state = writeByte addr (byte value) state
-        setRegs (Cpu.Dec16 HL state.Regs) state
-
-      | LdANN ->
-        let (addr, state) = fetch16 state
-        let value = readByte addr state
-        setRegs (Cpu.LoadN8 A (uint16 value) state.Regs) state
-
-      | LdNNA ->
-        let (addr, state) = fetch16 state
-        let value = Cpu.getRegisterValue (R8 A) state.Regs
-        writeByte addr (byte value) state
-
-      | LdhAN ->
-        let (offset, state) = fetchByte state
-        let addr = 0xFF00us + uint16 offset
-        let value = readByte addr state
-        setRegs (Cpu.LoadN8 A (uint16 value) state.Regs) state
-
-      | LdhNA ->
-        let (offset, state) = fetchByte state
-        let addr = 0xFF00us + uint16 offset
-        let value = Cpu.getRegisterValue (R8 A) state.Regs
-        writeByte addr (byte value) state
-
-      | LdhAC ->
-        let c = Cpu.getRegisterValue (R8 C) state.Regs
-        let addr = 0xFF00us + c
-        let value = readByte addr state
-        setRegs (Cpu.LoadN8 A (uint16 value) state.Regs) state
-
-      | LdhCA ->
-        let c = Cpu.getRegisterValue (R8 C) state.Regs
-        let addr = 0xFF00us + c
-        let value = Cpu.getRegisterValue (R8 A) state.Regs
-        writeByte addr (byte value) state
-
-      | LdSPHL ->
-        setRegs (Cpu.LoadH SP HL state.Regs) state
-
-      | LdNNSP ->
-        let (addr, state) = fetch16 state
-        let sp = Cpu.getRegisterValue (R16 SP) state.Regs
-        write16 addr sp state
-
-      // 8-bit ALU with register/memory
-      | AddR idx ->
-        if idx = 6 then
-          let addr = Cpu.getRegisterValue (R16 HL) state.Regs
-          let value = uint16 (readByte addr state)
-          setRegs (Cpu.AddMem value state.Regs) state
-        else
-          let srcReg = match r8map.[idx] with R8 r -> r | _ -> A
-          setRegs (Cpu.AddR srcReg state.Regs) state
-
-      | AdcR idx ->
-        if idx = 6 then
-          let addr = Cpu.getRegisterValue (R16 HL) state.Regs
-          let value = uint16 (readByte addr state)
-          setRegs (Cpu.AdcMem value state.Regs) state
-        else
-          let srcReg = match r8map.[idx] with R8 r -> r | _ -> A
-          setRegs (Cpu.AdcR srcReg state.Regs) state
-
-      | SubR idx ->
-        if idx = 6 then
-          let addr = Cpu.getRegisterValue (R16 HL) state.Regs
-          let value = uint16 (readByte addr state)
-          setRegs (Cpu.SubMem value state.Regs) state
-        else
-          let srcReg = match r8map.[idx] with R8 r -> r | _ -> A
-          setRegs (Cpu.SubR srcReg state.Regs) state
-
-      | SbcR idx ->
-        if idx = 6 then
-          let addr = Cpu.getRegisterValue (R16 HL) state.Regs
-          let value = uint16 (readByte addr state)
-          setRegs (Cpu.SbcMem value state.Regs) state
-        else
-          let srcReg = match r8map.[idx] with R8 r -> r | _ -> A
-          setRegs (Cpu.SbcR srcReg state.Regs) state
-
-      | AndR idx ->
-        if idx = 6 then
-          let addr = Cpu.getRegisterValue (R16 HL) state.Regs
-          let value = uint16 (readByte addr state)
-          setRegs (Cpu.AndMem value state.Regs) state
-        else
-          let srcReg = match r8map.[idx] with R8 r -> r | _ -> A
-          setRegs (Cpu.AndR srcReg state.Regs) state
-
-      | XorR idx ->
-        if idx = 6 then
-          let addr = Cpu.getRegisterValue (R16 HL) state.Regs
-          let value = uint16 (readByte addr state)
-          setRegs (Cpu.XorMem value state.Regs) state
-        else
-          let srcReg = match r8map.[idx] with R8 r -> r | _ -> A
-          setRegs (Cpu.XorR srcReg state.Regs) state
-
-      | OrR idx ->
-        if idx = 6 then
-          let addr = Cpu.getRegisterValue (R16 HL) state.Regs
-          let value = uint16 (readByte addr state)
-          setRegs (Cpu.OrMem value state.Regs) state
-        else
-          let srcReg = match r8map.[idx] with R8 r -> r | _ -> A
-          setRegs (Cpu.OrR srcReg state.Regs) state
-
-      | CpR idx ->
-        if idx = 6 then
-          let addr = Cpu.getRegisterValue (R16 HL) state.Regs
-          let value = uint16 (readByte addr state)
-          setRegs (Cpu.CpMem value state.Regs) state
-        else
-          let srcReg = match r8map.[idx] with R8 r -> r | _ -> A
-          setRegs (Cpu.CpR srcReg state.Regs) state
-
-      // INC/DEC r/(HL)
-      | IncR idx ->
-        if idx = 6 then
-          let addr = Cpu.getRegisterValue (R16 HL) state.Regs
-          let value = uint16 (readByte addr state)
-          let (newVal, newRegs) = Cpu.IncMem value state.Regs
-          writeByte addr newVal { state with Regs = newRegs }
-        else
-          let reg = match r8map.[idx] with R8 r -> r | _ -> A
-          setRegs (Cpu.IncR reg state.Regs) state
-
-      | DecR idx ->
-        if idx = 6 then
-          let addr = Cpu.getRegisterValue (R16 HL) state.Regs
-          let value = uint16 (readByte addr state)
-          let (newVal, newRegs) = Cpu.DecMem value state.Regs
-          writeByte addr newVal { state with Regs = newRegs }
-        else
-          let reg = match r8map.[idx] with R8 r -> r | _ -> A
-          setRegs (Cpu.DecR reg state.Regs) state
-
-      // 16-bit ALU
-      | Inc16 reg -> setRegs (Cpu.Inc16 reg state.Regs) state
-      | Dec16 reg -> setRegs (Cpu.Dec16 reg state.Regs) state
-      | AddHL reg -> setRegs (Cpu.AddHL reg state.Regs) state
-
-      // Rotate instructions
-      | Rlca -> setRegs (Cpu.Rlca state.Regs) state
-      | Rrca -> setRegs (Cpu.Rrca state.Regs) state
-      | Rla -> setRegs (Cpu.Rla state.Regs) state
-      | Rra -> setRegs (Cpu.Rra state.Regs) state
-
-      // Misc instructions
-      | Daa -> setRegs (Cpu.Daa state.Regs) state
-      | Cpl -> setRegs (Cpu.Cpl state.Regs) state
-      | Scf -> setRegs (Cpu.Scf state.Regs) state
-      | Ccf -> setRegs (Cpu.Ccf state.Regs) state
-
-      // Immediate ALU
-      | AddN8 -> let (imm, state) = fetchByte state in setRegs (Cpu.AddN8 (uint16 imm) state.Regs) state
-      | AdcN8 -> let (imm, state) = fetchByte state in setRegs (Cpu.AdcN8 (uint16 imm) state.Regs) state
-      | SubN8 -> let (imm, state) = fetchByte state in setRegs (Cpu.SubN8 (uint16 imm) state.Regs) state
-      | SbcN8 -> let (imm, state) = fetchByte state in setRegs (Cpu.SbcN8 (uint16 imm) state.Regs) state
-      | AndN8 -> let (imm, state) = fetchByte state in setRegs (Cpu.AndN8 (uint16 imm) state.Regs) state
-      | XorN8 -> let (imm, state) = fetchByte state in setRegs (Cpu.XorN8 (uint16 imm) state.Regs) state
-      | OrN8 -> let (imm, state) = fetchByte state in setRegs (Cpu.OrN8 (uint16 imm) state.Regs) state
-      | CpN8 -> let (imm, state) = fetchByte state in setRegs (Cpu.CpN8 (uint16 imm) state.Regs) state
-
-      // Jump instructions
-      | JpNN ->
-        let (addr, state) = fetch16 state
-        setRegs (Cpu.Jp addr state.Regs) state
-
-      | JpNZ ->
-        let (addr, state) = fetch16 state
-        if not (Cpu.isZ state.Regs) then setRegs (Cpu.Jp addr state.Regs) state else state
-
-      | JpZ ->
-        let (addr, state) = fetch16 state
-        if Cpu.isZ state.Regs then setRegs (Cpu.Jp addr state.Regs) state else state
-
-      | JpNC ->
-        let (addr, state) = fetch16 state
-        if not (Cpu.isC state.Regs) then setRegs (Cpu.Jp addr state.Regs) state else state
-
-      | JpC ->
-        let (addr, state) = fetch16 state
-        if Cpu.isC state.Regs then setRegs (Cpu.Jp addr state.Regs) state else state
-
-      | JpHL -> setRegs (Cpu.JpHL state.Regs) state
-
-      | JrE8 ->
-        let (offset, state) = fetchByte state
-        setRegs (Cpu.Jr offset state.Regs) state
-
-      | JrNZ ->
-        let (offset, state) = fetchByte state
-        if not (Cpu.isZ state.Regs) then setRegs (Cpu.Jr offset state.Regs) state else state
-
-      | JrZ ->
-        let (offset, state) = fetchByte state
-        if Cpu.isZ state.Regs then setRegs (Cpu.Jr offset state.Regs) state else state
-
-      | JrNC ->
-        let (offset, state) = fetchByte state
-        if not (Cpu.isC state.Regs) then setRegs (Cpu.Jr offset state.Regs) state else state
-
-      | JrC ->
-        let (offset, state) = fetchByte state
-        if Cpu.isC state.Regs then setRegs (Cpu.Jr offset state.Regs) state else state
-
-      // Call instructions
-      | CallNN ->
-        let (addr, state) = fetch16 state
-        let (sp, retAddr, regs) = Cpu.Call addr state.Regs
-        let state = { state with Regs = regs }
-        write16 sp retAddr state
-
-      | CallNZ ->
-        let (addr, state) = fetch16 state
-        if not (Cpu.isZ state.Regs) then
-          let (sp, retAddr, regs) = Cpu.Call addr state.Regs
-          write16 sp retAddr { state with Regs = regs }
-        else state
-
-      | CallZ ->
-        let (addr, state) = fetch16 state
-        if Cpu.isZ state.Regs then
-          let (sp, retAddr, regs) = Cpu.Call addr state.Regs
-          write16 sp retAddr { state with Regs = regs }
-        else state
-
-      | CallNC ->
-        let (addr, state) = fetch16 state
-        if not (Cpu.isC state.Regs) then
-          let (sp, retAddr, regs) = Cpu.Call addr state.Regs
-          write16 sp retAddr { state with Regs = regs }
-        else state
-
-      | CallC ->
-        let (addr, state) = fetch16 state
-        if Cpu.isC state.Regs then
-          let (sp, retAddr, regs) = Cpu.Call addr state.Regs
-          write16 sp retAddr { state with Regs = regs }
-        else state
-
-      // Return instructions
-      | Ret ->
-        let sp = Cpu.getRegisterValue (R16 SP) state.Regs
-        let retAddr = read16 sp state
-        setRegs (Cpu.Ret retAddr state.Regs) state
-
-      | RetNZ ->
-        if not (Cpu.isZ state.Regs) then
-          let sp = Cpu.getRegisterValue (R16 SP) state.Regs
-          let retAddr = read16 sp state
-          setRegs (Cpu.Ret retAddr state.Regs) state
-        else state
-
-      | RetZ ->
-        if Cpu.isZ state.Regs then
-          let sp = Cpu.getRegisterValue (R16 SP) state.Regs
-          let retAddr = read16 sp state
-          setRegs (Cpu.Ret retAddr state.Regs) state
-        else state
-
-      | RetNC ->
-        if not (Cpu.isC state.Regs) then
-          let sp = Cpu.getRegisterValue (R16 SP) state.Regs
-          let retAddr = read16 sp state
-          setRegs (Cpu.Ret retAddr state.Regs) state
-        else state
-
-      | RetC ->
-        if Cpu.isC state.Regs then
-          let sp = Cpu.getRegisterValue (R16 SP) state.Regs
-          let retAddr = read16 sp state
-          setRegs (Cpu.Ret retAddr state.Regs) state
-        else state
-
-      | Reti ->
-        let sp = Cpu.getRegisterValue (R16 SP) state.Regs
-        let retAddr = read16 sp state
-        { setRegs (Cpu.Ret retAddr state.Regs) state with Ime = true }
-
-      // RST instructions
-      | Rst00 -> let (sp, retAddr, regs) = Cpu.Rst 0x00uy state.Regs in write16 sp retAddr { state with Regs = regs }
-      | Rst08 -> let (sp, retAddr, regs) = Cpu.Rst 0x08uy state.Regs in write16 sp retAddr { state with Regs = regs }
-      | Rst10 -> let (sp, retAddr, regs) = Cpu.Rst 0x10uy state.Regs in write16 sp retAddr { state with Regs = regs }
-      | Rst18 -> let (sp, retAddr, regs) = Cpu.Rst 0x18uy state.Regs in write16 sp retAddr { state with Regs = regs }
-      | Rst20 -> let (sp, retAddr, regs) = Cpu.Rst 0x20uy state.Regs in write16 sp retAddr { state with Regs = regs }
-      | Rst28 -> let (sp, retAddr, regs) = Cpu.Rst 0x28uy state.Regs in write16 sp retAddr { state with Regs = regs }
-      | Rst30 -> let (sp, retAddr, regs) = Cpu.Rst 0x30uy state.Regs in write16 sp retAddr { state with Regs = regs }
-      | Rst38 -> let (sp, retAddr, regs) = Cpu.Rst 0x38uy state.Regs in write16 sp retAddr { state with Regs = regs }
-
-      // Stack instructions
-      | PushBC ->
-        let value = Cpu.getRegisterValue (R16 BC) state.Regs
-        let (sp, _, regs) = Cpu.Push value state.Regs
-        write16 sp value { state with Regs = regs }
-
-      | PushDE ->
-        let value = Cpu.getRegisterValue (R16 DE) state.Regs
-        let (sp, _, regs) = Cpu.Push value state.Regs
-        write16 sp value { state with Regs = regs }
-
-      | PushHL ->
-        let value = Cpu.getRegisterValue (R16 HL) state.Regs
-        let (sp, _, regs) = Cpu.Push value state.Regs
-        write16 sp value { state with Regs = regs }
-
-      | PushAF ->
-        let value = Cpu.getRegisterValue (R16 AF) state.Regs
-        let (sp, _, regs) = Cpu.Push value state.Regs
-        write16 sp value { state with Regs = regs }
-
-      | PopBC ->
-        let sp = Cpu.getRegisterValue (R16 SP) state.Regs
-        let value = read16 sp state
-        let (_, regs) = Cpu.Pop value state.Regs
-        setRegs (Cpu.setRegisterValue (R16 BC) value regs) state
-
-      | PopDE ->
-        let sp = Cpu.getRegisterValue (R16 SP) state.Regs
-        let value = read16 sp state
-        let (_, regs) = Cpu.Pop value state.Regs
-        setRegs (Cpu.setRegisterValue (R16 DE) value regs) state
-
-      | PopHL ->
-        let sp = Cpu.getRegisterValue (R16 SP) state.Regs
-        let value = read16 sp state
-        let (_, regs) = Cpu.Pop value state.Regs
-        setRegs (Cpu.setRegisterValue (R16 HL) value regs) state
-
-      | PopAF ->
-        let sp = Cpu.getRegisterValue (R16 SP) state.Regs
-        let value = read16 sp state
-        let (_, regs) = Cpu.Pop value state.Regs
-        // AF lower 4 bits are always 0
-        setRegs (Cpu.setRegisterValue (R16 AF) (value &&& 0xFFF0us) regs) state
-
-      // Interrupt control
-      | Di -> { state with Ime = false }
-      | Ei -> { state with Ime = true }
-
-      // Unknown opcode - skip
-      | _ -> state
+
+      // 命令の実行とサイクル計算
+      let (newState, cycles) =
+        match opcode with
+        | Nop -> (advancePc 1 state, 4)
+        | Halt -> ({ (advancePc 1 state) with Halted = true }, 4)
+        | CBPrefixed ->
+            let stateAfterPC = advancePc 1 state
+            let (s, c) = stepCb stateAfterPC
+            (s, c + 4) // CB命令自体のサイクル(4)を追加
+
+        // 8-bit Load
+        | LdRR (dst_idx, src_idx) ->
+            let s = advancePc 1 state
+            let newState =
+              if dst_idx = 6 then // LD (HL), r
+                let srcReg = match r8map.[src_idx] with R8 r -> r | _ -> failwith "Invalid src"
+                let value = Cpu.getRegisterValue (R8 srcReg) s.Regs
+                let addr = Cpu.getRegisterValue (R16 HL) s.Regs
+                writeByte addr (byte value) s
+              elif src_idx = 6 then // LD r, (HL)
+                let dstReg = match r8map.[dst_idx] with R8 r -> r | _ -> failwith "Invalid dst"
+                let addr = Cpu.getRegisterValue (R16 HL) s.Regs
+                let value = readByte addr s
+                setRegs (Cpu.LoadN8 dstReg (uint16 value) s.Regs) s
+              else // LD r, r'
+                let dstReg = match r8map.[dst_idx] with R8 r -> r | _ -> failwith "Invalid dst"
+                let srcReg = match r8map.[src_idx] with R8 r -> r | _ -> failwith "Invalid src"
+                setRegs (Cpu.LoadR dstReg srcReg s.Regs) s
+            let c = if dst_idx = 6 || src_idx = 6 then 8 else 4
+            (newState, c)
+
+        | LdRN8 dst_idx ->
+            let (imm, s) = state |> advancePc 1 |> fetchByte
+            let newState =
+                if dst_idx = 6 then // LD (HL), n8
+                    let addr = Cpu.getRegisterValue (R16 HL) s.Regs
+                    writeByte addr imm s
+                else
+                    let dstReg = match r8map.[dst_idx] with R8 r -> r | _ -> failwith "invalid reg"
+                    setRegs (Cpu.LoadN8 dstReg (uint16 imm) s.Regs) s
+            let c = if dst_idx = 6 then 12 else 8
+            (newState, c)
+
+        | LdHImm16 reg ->
+            let (imm, s) = state |> advancePc 1 |> fetch16
+            let newState = setRegs (Cpu.LoadN16 reg imm s.Regs) s
+            (newState, 12)
+
+        | LdABC ->
+            let s = advancePc 1 state
+            let addr = Cpu.getRegisterValue (R16 BC) s.Regs
+            let value = readByte addr s
+            let newState = setRegs (Cpu.LoadN8 A (uint16 value) s.Regs) s
+            (newState, 8)
+        | LdADE ->
+            let s = advancePc 1 state
+            let addr = Cpu.getRegisterValue (R16 DE) s.Regs
+            let value = readByte addr s
+            let newState = setRegs (Cpu.LoadN8 A (uint16 value) s.Regs) s
+            (newState, 8)
+        | LdBCA ->
+            let s = advancePc 1 state
+            let addr = Cpu.getRegisterValue (R16 BC) s.Regs
+            let value = Cpu.getRegisterValue (R8 A) s.Regs
+            let newState = writeByte addr (byte value) s
+            (newState, 8)
+        | LdDEA ->
+            let s = advancePc 1 state
+            let addr = Cpu.getRegisterValue (R16 DE) s.Regs
+            let value = Cpu.getRegisterValue (R8 A) s.Regs
+            let newState = writeByte addr (byte value) s
+            (newState, 8)
+
+        | LdAHLI ->
+            let s = advancePc 1 state
+            let addr = Cpu.getRegisterValue (R16 HL) s.Regs
+            let value = readByte addr s
+            let s_val = setRegs (Cpu.LoadN8 A (uint16 value) s.Regs) s
+            let newState = setRegs (Cpu.Inc16 HL s_val.Regs) s_val
+            (newState, 8)
+        | LdAHLD ->
+            let s = advancePc 1 state
+            let addr = Cpu.getRegisterValue (R16 HL) s.Regs
+            let value = readByte addr s
+            let s_val = setRegs (Cpu.LoadN8 A (uint16 value) s.Regs) s
+            let newState = setRegs (Cpu.Dec16 HL s_val.Regs) s_val
+            (newState, 8)
+        | LdHLIA ->
+            let s = advancePc 1 state
+            let addr = Cpu.getRegisterValue (R16 HL) s.Regs
+            let value = Cpu.getRegisterValue (R8 A) s.Regs
+            let s_val = writeByte addr (byte value) s
+            let newState = setRegs (Cpu.Inc16 HL s_val.Regs) s_val
+            (newState, 8)
+        | LdHLDA ->
+            let s = advancePc 1 state
+            let addr = Cpu.getRegisterValue (R16 HL) s.Regs
+            let value = Cpu.getRegisterValue (R8 A) s.Regs
+            let s_val = writeByte addr (byte value) s
+            let newState = setRegs (Cpu.Dec16 HL s_val.Regs) s_val
+            (newState, 8)
+
+        | LdANN ->
+            let (addr, s) = state |> advancePc 1 |> fetch16
+            let value = readByte addr s
+            let newState = setRegs (Cpu.LoadN8 A (uint16 value) s.Regs) s
+            (newState, 16)
+        | LdNNA ->
+            let (addr, s) = state |> advancePc 1 |> fetch16
+            let value = Cpu.getRegisterValue (R8 A) s.Regs
+            let newState = writeByte addr (byte value) s
+            (newState, 16)
+        | LdNNSP ->
+            let (addr, s) = state |> advancePc 1 |> fetch16
+            let value = Cpu.getRegisterValue (R16 SP) s.Regs
+            let newState = write16 addr value s
+            (newState, 20)
+
+        | LdhAN ->
+            let (offset, s) = state |> advancePc 1 |> fetchByte
+            let addr = 0xFF00us + uint16 offset
+            let value = readByte addr s
+            let newState = setRegs (Cpu.LoadN8 A (uint16 value) s.Regs) s
+            (newState, 12)
+        | LdhNA ->
+            let (offset, s) = state |> advancePc 1 |> fetchByte
+            let addr = 0xFF00us + uint16 offset
+            let value = Cpu.getRegisterValue (R8 A) s.Regs
+            let newState = writeByte addr (byte value) s
+            (newState, 12)
+        | LdhAC ->
+            let s = advancePc 1 state
+            let offset = Cpu.getRegisterValue (R8 C) s.Regs
+            let addr = 0xFF00us + offset
+            let value = readByte addr s
+            let newState = setRegs (Cpu.LoadN8 A (uint16 value) s.Regs) s
+            (newState, 8)
+        | LdhCA ->
+            let s = advancePc 1 state
+            let offset = Cpu.getRegisterValue (R8 C) s.Regs
+            let addr = 0xFF00us + offset
+            let value = Cpu.getRegisterValue (R8 A) s.Regs
+            let newState = writeByte addr (byte value) s
+            (newState, 8)
+
+        | LdSPHL ->
+            let s = advancePc 1 state
+            let newState = setRegs (Cpu.LoadH SP HL s.Regs) s
+            (newState, 8)
+
+        // 8-bit ALU
+        | AddR regIdx ->
+            let s = advancePc 1 state
+            let newState =
+                if regIdx = 6 then // ADD A, (HL)
+                    let addr = Cpu.getRegisterValue (R16 HL) s.Regs
+                    let value = readByte addr s
+                    setRegs (Cpu.AddMem (uint16 value) s.Regs) s
+                else
+                    let reg = match r8map.[regIdx] with R8 r -> r | _ -> failwith "invalid reg"
+                    setRegs (Cpu.AddR reg s.Regs) s
+            let c = if regIdx = 6 then 8 else 4
+            (newState, c)
+        | AdcR regIdx ->
+            let s = advancePc 1 state
+            let newState =
+                if regIdx = 6 then // ADC A, (HL)
+                    let addr = Cpu.getRegisterValue (R16 HL) s.Regs
+                    let value = readByte addr s
+                    setRegs (Cpu.AdcMem (uint16 value) s.Regs) s
+                else
+                    let reg = match r8map.[regIdx] with R8 r -> r | _ -> failwith "invalid reg"
+                    setRegs (Cpu.AdcR reg s.Regs) s
+            let c = if regIdx = 6 then 8 else 4
+            (newState, c)
+        | SubR regIdx ->
+            let s = advancePc 1 state
+            let newState =
+                if regIdx = 6 then // SUB (HL)
+                    let addr = Cpu.getRegisterValue (R16 HL) s.Regs
+                    let value = readByte addr s
+                    setRegs (Cpu.SubMem (uint16 value) s.Regs) s
+                else
+                    let reg = match r8map.[regIdx] with R8 r -> r | _ -> failwith "invalid reg"
+                    setRegs (Cpu.SubR reg s.Regs) s
+            let c = if regIdx = 6 then 8 else 4
+            (newState, c)
+        | SbcR regIdx ->
+            let s = advancePc 1 state
+            let newState =
+                if regIdx = 6 then // SBC A, (HL)
+                    let addr = Cpu.getRegisterValue (R16 HL) s.Regs
+                    let value = readByte addr s
+                    setRegs (Cpu.SbcMem (uint16 value) s.Regs) s
+                else
+                    let reg = match r8map.[regIdx] with R8 r -> r | _ -> failwith "invalid reg"
+                    setRegs (Cpu.SbcR reg s.Regs) s
+            let c = if regIdx = 6 then 8 else 4
+            (newState, c)
+        | AndR regIdx ->
+            let s = advancePc 1 state
+            let newState =
+                if regIdx = 6 then // AND (HL)
+                    let addr = Cpu.getRegisterValue (R16 HL) s.Regs
+                    let value = readByte addr s
+                    setRegs (Cpu.AndMem (uint16 value) s.Regs) s
+                else
+                    let reg = match r8map.[regIdx] with R8 r -> r | _ -> failwith "invalid reg"
+                    setRegs (Cpu.AndR reg s.Regs) s
+            let c = if regIdx = 6 then 8 else 4
+            (newState, c)
+        | XorR regIdx ->
+            let s = advancePc 1 state
+            let newState =
+                if regIdx = 6 then // XOR (HL)
+                    let addr = Cpu.getRegisterValue (R16 HL) s.Regs
+                    let value = readByte addr s
+                    setRegs (Cpu.XorMem (uint16 value) s.Regs) s
+                else
+                    let reg = match r8map.[regIdx] with R8 r -> r | _ -> failwith "invalid reg"
+                    setRegs (Cpu.XorR reg s.Regs) s
+            let c = if regIdx = 6 then 8 else 4
+            (newState, c)
+        | OrR regIdx ->
+            let s = advancePc 1 state
+            let newState =
+                if regIdx = 6 then // OR (HL)
+                    let addr = Cpu.getRegisterValue (R16 HL) s.Regs
+                    let value = readByte addr s
+                    setRegs (Cpu.OrMem (uint16 value) s.Regs) s
+                else
+                    let reg = match r8map.[regIdx] with R8 r -> r | _ -> failwith "invalid reg"
+                    setRegs (Cpu.OrR reg s.Regs) s
+            let c = if regIdx = 6 then 8 else 4
+            (newState, c)
+        | CpR regIdx ->
+            let s = advancePc 1 state
+            let newState =
+                if regIdx = 6 then // CP (HL)
+                    let addr = Cpu.getRegisterValue (R16 HL) s.Regs
+                    let value = readByte addr s
+                    setRegs (Cpu.CpMem (uint16 value) s.Regs) s
+                else
+                    let reg = match r8map.[regIdx] with R8 r -> r | _ -> failwith "invalid reg"
+                    setRegs (Cpu.CpR reg s.Regs) s
+            let c = if regIdx = 6 then 8 else 4
+            (newState, c)
+
+        | AddN8 ->
+            let (imm, s) = state |> advancePc 1 |> fetchByte
+            let newState = setRegs (Cpu.AddN8 (uint16 imm) s.Regs) s
+            (newState, 8)
+        | AdcN8 ->
+            let (imm, s) = state |> advancePc 1 |> fetchByte
+            let newState = setRegs (Cpu.AdcN8 (uint16 imm) s.Regs) s
+            (newState, 8)
+        | SubN8 ->
+            let (imm, s) = state |> advancePc 1 |> fetchByte
+            let newState = setRegs (Cpu.SubN8 (uint16 imm) s.Regs) s
+            (newState, 8)
+        | SbcN8 ->
+            let (imm, s) = state |> advancePc 1 |> fetchByte
+            let newState = setRegs (Cpu.SbcN8 (uint16 imm) s.Regs) s
+            (newState, 8)
+        | AndN8 ->
+            let (imm, s) = state |> advancePc 1 |> fetchByte
+            let newState = setRegs (Cpu.AndN8 (uint16 imm) s.Regs) s
+            (newState, 8)
+        | XorN8 ->
+            let (imm, s) = state |> advancePc 1 |> fetchByte
+            let newState = setRegs (Cpu.XorN8 (uint16 imm) s.Regs) s
+            (newState, 8)
+        | OrN8 ->
+            let (imm, s) = state |> advancePc 1 |> fetchByte
+            let newState = setRegs (Cpu.OrN8 (uint16 imm) s.Regs) s
+            (newState, 8)
+        | CpN8 ->
+            let (imm, s) = state |> advancePc 1 |> fetchByte
+            let newState = setRegs (Cpu.CpN8 (uint16 imm) s.Regs) s
+            (newState, 8)
+
+        | IncR regIdx ->
+            let s = advancePc 1 state
+            let newState =
+                if regIdx = 6 then // INC (HL)
+                    let addr = Cpu.getRegisterValue (R16 HL) s.Regs
+                    let value = readByte addr s
+                    let (res, newRegs) = Cpu.IncMem (uint16 value) s.Regs
+                    writeByte addr res { s with Regs = newRegs }
+                else
+                    let reg = match r8map.[regIdx] with R8 r -> r | _ -> failwith "invalid reg"
+                    setRegs (Cpu.IncR reg s.Regs) s
+            (newState, 12)
+        | DecR regIdx ->
+            let s = advancePc 1 state
+            let newState =
+                if regIdx = 6 then // DEC (HL)
+                    let addr = Cpu.getRegisterValue (R16 HL) s.Regs
+                    let value = readByte addr s
+                    let (res, newRegs) = Cpu.DecMem (uint16 value) s.Regs
+                    writeByte addr res { s with Regs = newRegs }
+                else
+                    let reg = match r8map.[regIdx] with R8 r -> r | _ -> failwith "invalid reg"
+                    setRegs (Cpu.DecR reg s.Regs) s
+            (newState, 12)
+        
+        // 16-bit Inc/Dec
+        | Inc16 reg ->
+            let s = advancePc 1 state
+            let newState = setRegs (Cpu.Inc16 reg s.Regs) s
+            (newState, 8)
+        | Dec16 reg ->
+            let s = advancePc 1 state
+            let newState = setRegs (Cpu.Dec16 reg s.Regs) s
+            (newState, 8)
+        
+        | AddHL reg ->
+            let s = advancePc 1 state
+            let newState = setRegs (Cpu.AddHL reg s.Regs) s
+            (newState, 8)
+
+        // Jumps
+        | JpNN ->
+            let (addr, s) = state |> advancePc 1 |> fetch16
+            let newState = setRegs (Cpu.Jp addr s.Regs) s
+            (newState, 16)
+        | JpNZ | JpZ | JpNC | JpC ->
+            let (addr, s) = state |> advancePc 1 |> fetch16
+            let cond = 
+                match opcode with 
+                | 0xC2uy -> NZ | 0xCAuy -> Z | 0xD2uy -> NC | _ -> CC
+            if Cpu.checkCondition cond s.Regs then
+                let newState = setRegs (Cpu.Jp addr s.Regs) s
+                (newState, 16)
+            else
+                (s, 12)
+        | JpHL ->
+            let s = advancePc 1 state
+            let newState = setRegs (Cpu.JpHL s.Regs) s
+            (newState, 4)
+        | JrE8 ->
+            let (offset, s) = state |> advancePc 1 |> fetchByte
+            let newState = setRegs (Cpu.Jr offset s.Regs) s
+            (newState, 12)
+        | JrNZ | JrZ | JrNC | JrC ->
+            let (offset, s) = state |> advancePc 1 |> fetchByte
+            let cond = 
+                match opcode with
+                | 0x20uy -> NZ | 0x28uy -> Z | 0x30uy -> NC | _ -> CC
+            if Cpu.checkCondition cond s.Regs then
+                let newState = setRegs (Cpu.Jr offset s.Regs) s
+                (newState, 12)
+            else
+                (s, 8)
+
+        // Calls
+        | CallNN ->
+            let (addr, s) = state |> advancePc 1 |> fetch16
+            let (sp, pc, newRegs) = Cpu.Call addr s.Regs
+            let newState = write16 sp pc { s with Regs = newRegs }
+            (newState, 24)
+        | CallNZ | CallZ | CallNC | CallC ->
+            let (addr, s) = state |> advancePc 1 |> fetch16
+            let cond =
+                match opcode with
+                | 0xC4uy -> NZ | 0xCCuy -> Z | 0xD4uy -> NC | _ -> CC
+            if Cpu.checkCondition cond s.Regs then
+                let (sp, pc, newRegs) = Cpu.Call addr s.Regs
+                let newState = write16 sp pc { s with Regs = newRegs }
+                (newState, 24)
+            else
+                (s, 12)
+
+        // Returns
+        | Ret ->
+            let s = advancePc 1 state
+            let retAddr = read16 s.Regs.SP s
+            let newState = setRegs (Cpu.Ret retAddr s.Regs) s
+            (newState, 16)
+        | RetNZ | RetZ | RetNC | RetC ->
+            let s = advancePc 1 state
+            let cond =
+                match opcode with
+                | 0xC0uy -> NZ | 0xC8uy -> Z | 0xD0uy -> NC | _ -> CC
+            if Cpu.checkCondition cond s.Regs then
+                let retAddr = read16 s.Regs.SP s
+                let newState = setRegs (Cpu.Ret retAddr s.Regs) s
+                (newState, 20)
+            else
+                (s, 8)
+        | Reti ->
+            let s = advancePc 1 state
+            let retAddr = read16 s.Regs.SP s
+            let newState = setRegs (Cpu.Ret retAddr s.Regs) { s with Ime = true }
+            (newState, 16)
+
+        // Rst
+        | Rst00 | Rst08 | Rst10 | Rst18 | Rst20 | Rst28 | Rst30 | Rst38 ->
+            let s = advancePc 1 state
+            let addr = opcode &&& 0x38uy
+            let (sp, pc, newRegs) = Cpu.Rst addr s.Regs
+            let newState = write16 sp pc { s with Regs = newRegs }
+            (newState, 16)
+
+        // Stack
+        | PushBC | PushDE | PushHL | PushAF ->
+            let s = advancePc 1 state
+            let reg = 
+                match opcode with
+                | 0xC5uy -> BC | 0xD5uy -> DE | 0xE5uy -> HL | _ -> AF
+            let value = Cpu.getRegisterValue (R16 reg) s.Regs
+            let (sp, _, newRegs) = Cpu.Push value s.Regs
+            let newState = write16 sp value { s with Regs = newRegs }
+            (newState, 16)
+        | PopBC | PopDE | PopHL | PopAF ->
+            let s = advancePc 1 state
+            let reg = 
+                match opcode with
+                | 0xC1uy -> BC | 0xD1uy -> DE | 0xE1uy -> HL | _ -> AF
+            let value = read16 s.Regs.SP s
+            let (_, newRegs) = Cpu.Pop value s.Regs
+            let newState = setRegs (Cpu.setRegisterValue (R16 reg) value newRegs) s
+            (newState, 12)
+
+        // Misc
+        | Rlca ->
+            let s = advancePc 1 state
+            let newState = setRegs (Cpu.Rlca s.Regs) s
+            (newState, 4)
+        | Rrca ->
+            let s = advancePc 1 state
+            let newState = setRegs (Cpu.Rrca s.Regs) s
+            (newState, 4)
+        | Rla ->
+            let s = advancePc 1 state
+            let newState = setRegs (Cpu.Rla s.Regs) s
+            (newState, 4)
+        | Rra ->
+            let s = advancePc 1 state
+            let newState = setRegs (Cpu.Rra s.Regs) s
+            (newState, 4)
+        | Daa ->
+            let s = advancePc 1 state
+            let newState = setRegs (Cpu.Daa s.Regs) s
+            (newState, 4)
+        | Cpl ->
+            let s = advancePc 1 state
+            let newState = setRegs (Cpu.Cpl s.Regs) s
+            (newState, 4)
+        | Scf ->
+            let s = advancePc 1 state
+            let newState = setRegs (Cpu.Scf s.Regs) s
+            (newState, 4)
+        | Ccf ->
+            let s = advancePc 1 state
+            let newState = setRegs (Cpu.Ccf s.Regs) s
+            (newState, 4)
+        
+        // Interrupts
+        | Di -> ({ (advancePc 1 state) with Ime = false }, 4)
+        | Ei -> ({ (advancePc 1 state) with Ime = true }, 4)
+
+        | _ ->
+          // TODO: Log this properly
+          // eprintfn "Unimplemented opcode: 0x%02X at 0x%04X" opcode state.Regs.PC
+          (advancePc 1 state, 4) // Default for unimplemented
+
+      // PPUをCPUサイクル分進める
+      let (ppu, mem) = Ppu.step cycles newState.Ppu newState.Mem
+      { newState with Ppu = ppu; Mem = mem }
 
   // Run until halted or max steps
   let run maxSteps (state: CpuState) =
@@ -704,6 +834,6 @@ module Decoder =
     let mem = Memory.create()
     let romArray = List.toArray memory
     let mem = Memory.loadRom romArray mem
-    let state = { Regs = reg; Mem = mem; Ime = false; Halted = false }
+    let state = { Regs = reg; Mem = mem; Ppu = Ppu.create(); Ime = false; Halted = false }
     let finalState = run (List.length memory * 2) state
     finalState.Regs

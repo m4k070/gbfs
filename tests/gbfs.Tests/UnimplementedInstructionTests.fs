@@ -3,6 +3,18 @@ module UnimplementedInstructionTests
 
 open Xunit
 open gbfs.Lib.Cpu
+open gbfs.Lib.Decoder
+open gbfs.Lib.Memory
+
+let initCpuState () =
+    let state = createState()
+    { state with Regs = { state.Regs with PC = 0us } }
+
+let testInstruction (memory: byte list) (initialState: CpuState) (assertions: CpuState -> unit) =
+    let rom = List.toArray memory
+    let state = loadRomToState rom initialState
+    let finalState = step state
+    assertions finalState
 
 let initRegister () =
     { AF = 0us; BC = 0us; DE = 0us; HL = 0us; PC = 0us; SP = 0us }
@@ -556,202 +568,231 @@ module MiscTests =
 // ====================
 
 module DecoderNewInstructionTests =
-    open gbfs.Lib.Decoder
 
     [<Fact>]
     let ``Decode ADC A,B (0x88)`` () =
-        let memory = [ 0x88uy ]
-        let reg = { initRegister() with AF = 0x1010us; BC = 0x0500us } // A=0x10, C=1
-        let result = Decode memory reg
-        Assert.Equal(0x16us, getRegisterValue (R8 A) result)
+        let state = initCpuState()
+        let state = { state with Regs = setRegisterValue (R8 B) 0x05us state.Regs }
+        let state = { state with Regs = { state.Regs with AF = 0x1010us } } // A=0x10, C=1
+        testInstruction [ 0x88uy ] state (fun finalState ->
+            Assert.Equal(0x16us, getRegisterValue (R8 A) finalState.Regs)
+        )
 
     [<Fact>]
     let ``Decode SBC A,B (0x98)`` () =
-        let memory = [ 0x98uy ]
-        let reg = { initRegister() with AF = 0x1010us; BC = 0x0500us } // A=0x10, C=1
-        let result = Decode memory reg
-        Assert.Equal(0x0Aus, getRegisterValue (R8 A) result)
+        let state = initCpuState()
+        let state = { state with Regs = setRegisterValue (R8 B) 0x05us state.Regs }
+        let state = { state with Regs = { state.Regs with AF = 0x1010us } } // A=0x10, C=1
+        testInstruction [ 0x98uy ] state (fun finalState ->
+            Assert.Equal(0x0Aus, getRegisterValue (R8 A) finalState.Regs)
+        )
 
     [<Fact>]
     let ``Decode AND B (0xA0)`` () =
-        let memory = [ 0xA0uy ]
-        let reg = { initRegister() with AF = 0xFF00us; BC = 0x0F00us }
-        let result = Decode memory reg
-        Assert.Equal(0x0Fus, getRegisterValue (R8 A) result)
+        let state = initCpuState()
+        let state = { state with Regs = setRegisterValue (R8 A) 0xFFus state.Regs }
+        let state = { state with Regs = setRegisterValue (R8 B) 0x0Fus state.Regs }
+        testInstruction [ 0xA0uy ] state (fun finalState ->
+            Assert.Equal(0x0Fus, getRegisterValue (R8 A) finalState.Regs)
+        )
 
     [<Fact>]
     let ``Decode XOR B (0xA8)`` () =
-        let memory = [ 0xA8uy ]
-        let reg = { initRegister() with AF = 0xFF00us; BC = 0x0F00us }
-        let result = Decode memory reg
-        Assert.Equal(0xF0us, getRegisterValue (R8 A) result)
+        let state = initCpuState()
+        let state = { state with Regs = setRegisterValue (R8 A) 0xFFus state.Regs }
+        let state = { state with Regs = setRegisterValue (R8 B) 0x0Fus state.Regs }
+        testInstruction [ 0xA8uy ] state (fun finalState ->
+            Assert.Equal(0xF0us, getRegisterValue (R8 A) finalState.Regs)
+        )
 
     [<Fact>]
     let ``Decode OR B (0xB0)`` () =
-        let memory = [ 0xB0uy ]
-        let reg = { initRegister() with AF = 0xF000us; BC = 0x0F00us }
-        let result = Decode memory reg
-        Assert.Equal(0xFFus, getRegisterValue (R8 A) result)
+        let state = initCpuState()
+        let state = { state with Regs = setRegisterValue (R8 A) 0xF0us state.Regs }
+        let state = { state with Regs = setRegisterValue (R8 B) 0x0Fus state.Regs }
+        testInstruction [ 0xB0uy ] state (fun finalState ->
+            Assert.Equal(0xFFus, getRegisterValue (R8 A) finalState.Regs)
+        )
 
     [<Fact>]
     let ``Decode CP B (0xB8)`` () =
-        let memory = [ 0xB8uy ]
-        let reg = { initRegister() with AF = 0x4200us; BC = 0x4200us }
-        let result = Decode memory reg
-        Assert.True(isZ result)
-        Assert.Equal(0x42us, getRegisterValue (R8 A) result) // A unchanged
+        let state = initCpuState()
+        let state = { state with Regs = setRegisterValue (R8 A) 0x42us state.Regs }
+        let state = { state with Regs = setRegisterValue (R8 B) 0x42us state.Regs }
+        testInstruction [ 0xB8uy ] state (fun finalState ->
+            Assert.True(isZ finalState.Regs)
+            Assert.Equal(0x42us, getRegisterValue (R8 A) finalState.Regs) // A unchanged
+        )
 
     [<Fact>]
     let ``Decode INC B (0x04)`` () =
-        let memory = [ 0x04uy ]
-        let reg = { initRegister() with BC = 0x4200us }
-        let result = Decode memory reg
-        Assert.Equal(0x43us, getRegisterValue (R8 B) result)
+        let state = initCpuState()
+        let state = { state with Regs = setRegisterValue (R8 B) 0x42us state.Regs }
+        testInstruction [ 0x04uy ] state (fun finalState ->
+            Assert.Equal(0x43us, getRegisterValue (R8 B) finalState.Regs)
+        )
 
     [<Fact>]
     let ``Decode DEC B (0x05)`` () =
-        let memory = [ 0x05uy ]
-        let reg = { initRegister() with BC = 0x4200us }
-        let result = Decode memory reg
-        Assert.Equal(0x41us, getRegisterValue (R8 B) result)
+        let state = initCpuState()
+        let state = { state with Regs = setRegisterValue (R8 B) 0x42us state.Regs }
+        testInstruction [ 0x05uy ] state (fun finalState ->
+            Assert.Equal(0x41us, getRegisterValue (R8 B) finalState.Regs)
+        )
 
     [<Fact>]
     let ``Decode INC BC (0x03)`` () =
-        let memory = [ 0x03uy ]
-        let reg = { initRegister() with BC = 0x1234us }
-        let result = Decode memory reg
-        Assert.Equal(0x1235us, result.BC)
+        let state = initCpuState()
+        let state = { state with Regs = { state.Regs with BC = 0x1234us } }
+        testInstruction [ 0x03uy ] state (fun finalState ->
+            Assert.Equal(0x1235us, finalState.Regs.BC)
+        )
 
     [<Fact>]
     let ``Decode DEC BC (0x0B)`` () =
-        let memory = [ 0x0Buy ]
-        let reg = { initRegister() with BC = 0x1234us }
-        let result = Decode memory reg
-        Assert.Equal(0x1233us, result.BC)
+        let state = initCpuState()
+        let state = { state with Regs = { state.Regs with BC = 0x1234us } }
+        testInstruction [ 0x0Buy ] state (fun finalState ->
+            Assert.Equal(0x1233us, finalState.Regs.BC)
+        )
 
     [<Fact>]
     let ``Decode ADD HL,BC (0x09)`` () =
-        let memory = [ 0x09uy ]
-        let reg = { initRegister() with HL = 0x1000us; BC = 0x0234us }
-        let result = Decode memory reg
-        Assert.Equal(0x1234us, result.HL)
+        let state = initCpuState()
+        let state = { state with Regs = { state.Regs with HL = 0x1000us; BC = 0x0234us } }
+        testInstruction [ 0x09uy ] state (fun finalState ->
+            Assert.Equal(0x1234us, finalState.Regs.HL)
+        )
 
     [<Fact>]
     let ``Decode RLCA (0x07)`` () =
-        let memory = [ 0x07uy ]
-        let reg = { initRegister() with AF = 0x8500us }
-        let result = Decode memory reg
-        Assert.Equal(0x0Bus, getRegisterValue (R8 A) result)
+        let state = initCpuState()
+        let state = { state with Regs = { state.Regs with AF = 0x8500us } }
+        testInstruction [ 0x07uy ] state (fun finalState ->
+            Assert.Equal(0x0Bus, getRegisterValue (R8 A) finalState.Regs)
+        )
 
     [<Fact>]
     let ``Decode RRCA (0x0F)`` () =
-        let memory = [ 0x0Fuy ]
-        let reg = { initRegister() with AF = 0x0100us }
-        let result = Decode memory reg
-        Assert.Equal(0x80us, getRegisterValue (R8 A) result)
+        let state = initCpuState()
+        let state = { state with Regs = { state.Regs with AF = 0x0100us } }
+        testInstruction [ 0x0Fuy ] state (fun finalState ->
+            Assert.Equal(0x80us, getRegisterValue (R8 A) finalState.Regs)
+        )
 
     [<Fact>]
     let ``Decode RLA (0x17)`` () =
-        let memory = [ 0x17uy ]
-        let reg = { initRegister() with AF = 0x8010us }
-        let result = Decode memory reg
-        Assert.Equal(0x01us, getRegisterValue (R8 A) result)
+        let state = initCpuState()
+        let state = { state with Regs = { state.Regs with AF = 0x8010us } }
+        testInstruction [ 0x17uy ] state (fun finalState ->
+            Assert.Equal(0x01us, getRegisterValue (R8 A) finalState.Regs)
+        )
 
     [<Fact>]
     let ``Decode RRA (0x1F)`` () =
-        let memory = [ 0x1Fuy ]
-        let reg = { initRegister() with AF = 0x0110us }
-        let result = Decode memory reg
-        Assert.Equal(0x80us, getRegisterValue (R8 A) result)
+        let state = initCpuState()
+        let state = { state with Regs = { state.Regs with AF = 0x0110us } }
+        testInstruction [ 0x1Fuy ] state (fun finalState ->
+            Assert.Equal(0x80us, getRegisterValue (R8 A) finalState.Regs)
+        )
 
     [<Fact>]
     let ``Decode DAA (0x27)`` () =
-        let memory = [ 0x27uy ]
-        let reg = { initRegister() with AF = 0x0A00us }
-        let result = Decode memory reg
-        Assert.Equal(0x10us, getRegisterValue (R8 A) result)
+        let state = initCpuState()
+        let state = { state with Regs = { state.Regs with AF = 0x0A00us } }
+        testInstruction [ 0x27uy ] state (fun finalState ->
+            Assert.Equal(0x10us, getRegisterValue (R8 A) finalState.Regs)
+        )
 
     [<Fact>]
     let ``Decode CPL (0x2F)`` () =
-        let memory = [ 0x2Fuy ]
-        let reg = { initRegister() with AF = 0xF000us }
-        let result = Decode memory reg
-        Assert.Equal(0x0Fus, getRegisterValue (R8 A) result)
+        let state = initCpuState()
+        let state = { state with Regs = { state.Regs with AF = 0xF000us } }
+        testInstruction [ 0x2Fuy ] state (fun finalState ->
+            Assert.Equal(0x0Fus, getRegisterValue (R8 A) finalState.Regs)
+        )
 
     [<Fact>]
     let ``Decode SCF (0x37)`` () =
-        let memory = [ 0x37uy ]
-        let reg = initRegister()
-        let result = Decode memory reg
-        Assert.True(isC result)
+        testInstruction [ 0x37uy ] (initCpuState()) (fun finalState ->
+            Assert.True(isC finalState.Regs)
+        )
 
     [<Fact>]
     let ``Decode CCF (0x3F)`` () =
-        let memory = [ 0x3Fuy ]
-        let reg = initRegister() |> setFlag false false false true
-        let result = Decode memory reg
-        Assert.False(isC result)
+        let state = initCpuState()
+        let state = { state with Regs = setFlag false false false true state.Regs }
+        testInstruction [ 0x3Fuy ] state (fun finalState ->
+            Assert.False(isC finalState.Regs)
+        )
 
     [<Fact>]
     let ``Decode LD B,n8 (0x06)`` () =
-        let memory = [ 0x06uy; 0x42uy ]
-        let reg = initRegister()
-        let result = Decode memory reg
-        Assert.Equal(0x42us, getRegisterValue (R8 B) result)
-        Assert.Equal(2us, result.PC)
+        testInstruction [ 0x06uy; 0x42uy ] (initCpuState()) (fun finalState ->
+            Assert.Equal(0x42us, getRegisterValue (R8 B) finalState.Regs)
+            Assert.Equal(2us, finalState.Regs.PC)
+        )
 
     [<Fact>]
     let ``Decode ADD A,n8 (0xC6)`` () =
-        let memory = [ 0xC6uy; 0x10uy ]
-        let reg = { initRegister() with AF = 0x2000us }
-        let result = Decode memory reg
-        Assert.Equal(0x30us, getRegisterValue (R8 A) result)
+        let state = initCpuState()
+        let state = { state with Regs = setRegisterValue (R8 A) 0x20us state.Regs }
+        testInstruction [ 0xC6uy; 0x10uy ] state (fun finalState ->
+            Assert.Equal(0x30us, getRegisterValue (R8 A) finalState.Regs)
+        )
 
     [<Fact>]
     let ``Decode ADC A,n8 (0xCE)`` () =
-        let memory = [ 0xCEuy; 0x10uy ]
-        let reg = { initRegister() with AF = 0x2010us } // C=1
-        let result = Decode memory reg
-        Assert.Equal(0x31us, getRegisterValue (R8 A) result)
+        let state = initCpuState()
+        let state = { state with Regs = { state.Regs with AF = 0x2010us } } // C=1
+        testInstruction [ 0xCEuy; 0x10uy ] state (fun finalState ->
+            Assert.Equal(0x31us, getRegisterValue (R8 A) finalState.Regs)
+        )
 
     [<Fact>]
     let ``Decode SUB n8 (0xD6)`` () =
-        let memory = [ 0xD6uy; 0x10uy ]
-        let reg = { initRegister() with AF = 0x3000us }
-        let result = Decode memory reg
-        Assert.Equal(0x20us, getRegisterValue (R8 A) result)
+        let state = initCpuState()
+        let state = { state with Regs = setRegisterValue (R8 A) 0x30us state.Regs }
+        testInstruction [ 0xD6uy; 0x10uy ] state (fun finalState ->
+            Assert.Equal(0x20us, getRegisterValue (R8 A) finalState.Regs)
+        )
 
     [<Fact>]
     let ``Decode SBC A,n8 (0xDE)`` () =
-        let memory = [ 0xDEuy; 0x10uy ]
-        let reg = { initRegister() with AF = 0x3010us } // C=1
-        let result = Decode memory reg
-        Assert.Equal(0x1Fus, getRegisterValue (R8 A) result)
+        let state = initCpuState()
+        let state = { state with Regs = { state.Regs with AF = 0x3010us } } // C=1
+        testInstruction [ 0xDEuy; 0x10uy ] state (fun finalState ->
+            Assert.Equal(0x1Fus, getRegisterValue (R8 A) finalState.Regs)
+        )
 
     [<Fact>]
     let ``Decode AND n8 (0xE6)`` () =
-        let memory = [ 0xE6uy; 0x0Fuy ]
-        let reg = { initRegister() with AF = 0xFF00us }
-        let result = Decode memory reg
-        Assert.Equal(0x0Fus, getRegisterValue (R8 A) result)
+        let state = initCpuState()
+        let state = { state with Regs = setRegisterValue (R8 A) 0xFFus state.Regs }
+        testInstruction [ 0xE6uy; 0x0Fuy ] state (fun finalState ->
+            Assert.Equal(0x0Fus, getRegisterValue (R8 A) finalState.Regs)
+        )
 
     [<Fact>]
     let ``Decode XOR n8 (0xEE)`` () =
-        let memory = [ 0xEEuy; 0x0Fuy ]
-        let reg = { initRegister() with AF = 0xFF00us }
-        let result = Decode memory reg
-        Assert.Equal(0xF0us, getRegisterValue (R8 A) result)
+        let state = initCpuState()
+        let state = { state with Regs = setRegisterValue (R8 A) 0xFFus state.Regs }
+        testInstruction [ 0xEEuy; 0x0Fuy ] state (fun finalState ->
+            Assert.Equal(0xF0us, getRegisterValue (R8 A) finalState.Regs)
+        )
 
     [<Fact>]
     let ``Decode OR n8 (0xF6)`` () =
-        let memory = [ 0xF6uy; 0x0Fuy ]
-        let reg = { initRegister() with AF = 0xF000us }
-        let result = Decode memory reg
-        Assert.Equal(0xFFus, getRegisterValue (R8 A) result)
+        let state = initCpuState()
+        let state = { state with Regs = setRegisterValue (R8 A) 0xF0us state.Regs }
+        testInstruction [ 0xF6uy; 0x0Fuy ] state (fun finalState ->
+            Assert.Equal(0xFFus, getRegisterValue (R8 A) finalState.Regs)
+        )
 
     [<Fact>]
     let ``Decode CP n8 (0xFE)`` () =
-        let memory = [ 0xFEuy; 0x42uy ]
-        let reg = { initRegister() with AF = 0x4200us }
-        let result = Decode memory reg
-        Assert.True(isZ result)
+        let state = initCpuState()
+        let state = { state with Regs = setRegisterValue (R8 A) 0x42us state.Regs }
+        testInstruction [ 0xFEuy; 0x42uy ] state (fun finalState ->
+            Assert.True(isZ finalState.Regs)
+        )

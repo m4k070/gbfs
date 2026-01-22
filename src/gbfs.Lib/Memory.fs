@@ -127,3 +127,22 @@ module Memory =
     let lo = byte (value &&& 0xFFus)
     let hi = byte (value >>> 8)
     mem |> write addr lo |> write (addr + 1us) hi
+
+  type InterruptType =
+      | VBlankInterrupt
+      | LcdStatInterrupt
+      | TimerInterrupt
+      | SerialInterrupt
+      | JoypadInterrupt
+
+  let requestInterrupt (interruptType: InterruptType) (mem: MemoryBus) : MemoryBus =
+      let ifReg = read 0xFF0Fus mem
+      let newIfReg =
+          match interruptType with
+          | VBlankInterrupt -> ifReg ||| 0x01uy
+          | LcdStatInterrupt -> ifReg ||| 0x02uy
+          | TimerInterrupt -> ifReg ||| 0x04uy
+          | SerialInterrupt -> ifReg ||| 0x08uy
+          | JoypadInterrupt -> ifReg ||| 0x10uy
+      write 0xFF0Fus newIfReg mem
+

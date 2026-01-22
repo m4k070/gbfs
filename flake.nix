@@ -26,8 +26,20 @@
             # この環境で使えるようにするツールを、ここに列挙する
             buildInputs = with pkgs; [
               dotnet-sdk_8
-              # ここに、必要なツール（例: go, rustc, etc...）を、どんどん追加していく
+              nodejs
             ];
+
+            # シェルロード時に実行されるスクリプト
+            shellHook = ''
+              # nixストア内のdotnet-sdkのパスをDOTNET_ROOTに設定する
+              export DOTNET_ROOT="${pkgs.dotnet-sdk_8}/share/dotnet";
+              
+              # 必要に応じて、PATHにもdotnetが含まれることを確実にする
+              # (buildInputsに入っていれば通常は不要だが、念のため)
+              export PATH="$DOTNET_ROOT/bin:$PATH"
+              
+              echo "Environment loaded: DOTNET_ROOT is set to $DOTNET_ROOT"
+            '';
           };
         });
     };

@@ -12,6 +12,7 @@
     <Compile Include="CpuTests.fs" />
     <Compile Include="DecoderTests.fs" />
     <Compile Include="UnimplementedInstructionTests.fs" />
+    <Compile Include="CBPrefixTests.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 
