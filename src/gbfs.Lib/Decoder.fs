@@ -924,11 +924,3 @@ module Decoder =
       else loop (steps + 1) (step state)
     loop 0 state
 
-  // Legacy Decode function for compatibility with existing tests
-  let rec Decode (memory: byte list) (reg: Cpu.Register) =
-    let mem = Memory.create()
-    let romArray = List.toArray memory
-    let mem = Memory.loadRom romArray mem
-    let state = { Regs = reg; Mem = mem; Ppu = Ppu.create(); Ime = false; Halted = false }
-    let finalState = run (List.length memory * 2) state
-    finalState.Regs

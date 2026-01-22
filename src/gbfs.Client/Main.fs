@@ -79,13 +79,14 @@ let update (jsRuntime: IJSRuntime) (msg: Message) (model: Model) : Model * Cmd<M
             let cyclesPerFrame = 70224
             let newState = Decoder.run cyclesPerFrame model.EmulatorState
 
-            let drawTask = async {
+            let frameTask = async {
                 do! jsRuntime.InvokeVoidAsync("drawScreen", newState.Ppu.FrameBuffer).AsTask() |> Async.AwaitTask
+                do! jsRuntime.InvokeVoidAsync("requestAnimationFrameAsync").AsTask() |> Async.AwaitTask
+                return RunFrame
             }
-            let drawCmd = Cmd.OfAsync.attempt (fun () -> drawTask) () (fun ex -> SetError ex.Message)
-            let continueCmd = Cmd.ofMsg RunFrame
+            let frameCmd = Cmd.OfAsync.perform (fun () -> frameTask) () id
 
-            { model with EmulatorState = newState; FrameCount = model.FrameCount + 1 }, Cmd.batch [drawCmd; continueCmd]
+            { model with EmulatorState = newState; FrameCount = model.FrameCount + 1 }, frameCmd
         else
             model, Cmd.none
 

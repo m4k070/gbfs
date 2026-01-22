@@ -80,4 +80,11 @@ window.clearScreen = function() {
     ctx.fillRect(0, 0, 160, 144);
 };
 
+// Request animation frame wrapper for smooth frame timing
+window.requestAnimationFrameAsync = function() {
+    return new Promise(resolve => {
+        requestAnimationFrame(() => resolve());
+    });
+};
+
 console.log('gbfs app.js loaded');
