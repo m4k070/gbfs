@@ -34,7 +34,7 @@ let page = doctypeHtml {
         }
         div {
             attr.id "main"
-            comp<Client.Main.MyApp> { attr.renderMode RenderMode.InteractiveWebAssembly }
+            comp<Client.Main.EmulatorApp> { attr.renderMode RenderMode.InteractiveWebAssembly }
         }
         boleroScript
     }

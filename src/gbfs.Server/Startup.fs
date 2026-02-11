@@ -1,13 +1,11 @@
 module gbfs.Server.Program
 
 open Microsoft.AspNetCore
-open Microsoft.AspNetCore.Authentication.Cookies
 open Microsoft.AspNetCore.Builder
 open Microsoft.AspNetCore.Hosting
 open Microsoft.Extensions.DependencyInjection
 open Microsoft.Extensions.Hosting
 open Bolero
-open Bolero.Remoting.Server
 open Bolero.Server
 open gbfs
 open Bolero.Templating.Server
@@ -21,11 +19,6 @@ let main args =
         .AddInteractiveWebAssemblyComponents()
     |> ignore
     builder.Services.AddServerSideBlazor() |> ignore
-    builder.Services.AddAuthorization()
-        .AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
-        .AddCookie()
-    |> ignore
-    builder.Services.AddBoleroRemoting<BookService>() |> ignore
     builder.Services.AddBoleroComponents() |> ignore
 #if DEBUG
     builder.Services.AddHotReload(templateDir = __SOURCE_DIRECTORY__ + "/../gbfs.Client") |> ignore
@@ -37,21 +30,18 @@ let main args =
         app.UseWebAssemblyDebugging()
 
     app
-        .UseAuthentication()
         .UseStaticFiles()
         .UseRouting()
-        .UseAuthorization()
         .UseAntiforgery()
     |> ignore
 
 #if DEBUG
     app.UseHotReload()
 #endif
-    app.MapBoleroRemoting() |> ignore
     app.MapRazorComponents<Index.Page>()
         .AddInteractiveServerRenderMode()
         .AddInteractiveWebAssemblyRenderMode()
-        .AddAdditionalAssemblies(typeof<Client.Main.MyApp>.Assembly)
+        .AddAdditionalAssemblies(typeof<Client.Main.EmulatorApp>.Assembly)
     |> ignore
 
     app.Run()

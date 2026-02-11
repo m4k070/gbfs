@@ -4,6 +4,9 @@ open Cpu
 open Memory
 open CBPrefix
 open Ppu
+open Apu
+open Joypad
+open Timer
 
 module Decoder =
   // オペコードのビット列(0-7)に対応するレジスタの定義
@@ -49,6 +52,18 @@ module Decoder =
   let (|Halt|_|) (opcode: uint8) =
     if opcode = 0x76uy then Some() else None
   
+  // STOP (0x10)
+  let (|Stop|_|) (opcode: uint8) =
+    if opcode = 0x10uy then Some() else None
+
+  // ADD SP, e8 (0xE8)
+  let (|AddSpE8|_|) (opcode: uint8) =
+    if opcode = 0xE8uy then Some() else None
+
+  // LD HL, SP+e8 (0xF8)
+  let (|LdHlSpE8|_|) (opcode: uint8) =
+    if opcode = 0xF8uy then Some() else None
+
   // CB Prefixed instruction
   let (|CBPrefixed|_|) (opcode: uint8) =
     if opcode = 0xCBuy then Some() else None
@@ -223,6 +238,9 @@ module Decoder =
     Regs: Register
     Mem: MemoryBus
     Ppu: PpuState
+    Apu: Apu.ApuState
+    Joypad: Joypad.JoypadState
+    Timer: Timer.TimerState
     Ime: bool  // Interrupt Master Enable
     Halted: bool
   }
@@ -231,6 +249,9 @@ module Decoder =
     Regs = Cpu.initRegister()
     Mem = Memory.create()
     Ppu = Ppu.create()
+    Apu = Apu.create()
+    Joypad = Joypad.create()
+    Timer = Timer.create()
     Ime = false
     Halted = false
   }
@@ -869,14 +890,46 @@ module Decoder =
         | Di -> ({ (advancePc 1 state) with Ime = false }, 4)
         | Ei -> ({ (advancePc 1 state) with Ime = true }, 4)
 
+        // STOP (0x10): halt CPU & LCD until button press
+        | Stop -> (advancePc 2 state, 4) // Skip next byte (0x00)
+
+        // ADD SP, e8 (0xE8): SP = SP + signed immediate
+        | AddSpE8 ->
+            let s = advancePc 1 state
+            let (operand, s) = fetchByte s
+            let sp = s.Regs.SP
+            let e8 = int (sbyte operand) // sign-extend
+            let result = int sp + e8
+            let h = ((int sp ^^^ e8 ^^^ result) &&& 0x10) <> 0
+            let c = ((int sp ^^^ e8 ^^^ result) &&& 0x100) <> 0
+            let newRegs = { s.Regs with SP = uint16 (result &&& 0xFFFF) }
+            let newRegs = Cpu.setFlag false false h c newRegs
+            (setRegs newRegs s, 16)
+
+        // LD HL, SP+e8 (0xF8): HL = SP + signed immediate
+        | LdHlSpE8 ->
+            let s = advancePc 1 state
+            let (operand, s) = fetchByte s
+            let sp = s.Regs.SP
+            let e8 = int (sbyte operand)
+            let result = int sp + e8
+            let h = ((int sp ^^^ e8 ^^^ result) &&& 0x10) <> 0
+            let c = ((int sp ^^^ e8 ^^^ result) &&& 0x100) <> 0
+            let newRegs = { s.Regs with HL = uint16 (result &&& 0xFFFF) }
+            let newRegs = Cpu.setFlag false false h c newRegs
+            (setRegs newRegs s, 12)
+
         | _ ->
           // TODO: Log this properly
           // eprintfn "Unimplemented opcode: 0x%02X at 0x%04X" opcode state.Regs.PC
           (advancePc 1 state, 4) // Default for unimplemented
 
-    // PPUをCPUサイクル分進める
-    let (ppu, mem) = Ppu.step cycles newState.Ppu newState.Mem
-    { newState with Ppu = ppu; Mem = mem }
+    // PPU・APU・Joypad・Timerを更新
+    let (ppu, mem1) = Ppu.step cycles newState.Ppu newState.Mem
+    let (apu, mem2) = Apu.step cycles newState.Apu mem1
+    let (joypad, mem3) = Joypad.sync newState.Joypad mem2
+    let (timer, mem4) = Timer.step cycles newState.Timer mem3
+    { newState with Ppu = ppu; Apu = apu; Joypad = joypad; Timer = timer; Mem = mem4 }
 
   // ====================
   // Single Step with Interrupt Handling
@@ -896,23 +949,32 @@ module Decoder =
         // Try to handle interrupt if IME is set
         match handleInterrupt wokenState with
         | Some (interruptedState, cycles) ->
-            // PPUをサイクル分進める
-            let (ppu, mem) = Ppu.step cycles interruptedState.Ppu interruptedState.Mem
-            { interruptedState with Ppu = ppu; Mem = mem }
+            // PPU・APU・Joypad・Timerを更新
+            let (ppu, mem1) = Ppu.step cycles interruptedState.Ppu interruptedState.Mem
+            let (apu, mem2) = Apu.step cycles interruptedState.Apu mem1
+            let (joypad, mem3) = Joypad.sync interruptedState.Joypad mem2
+            let (timer, mem4) = Timer.step cycles interruptedState.Timer mem3
+            { interruptedState with Ppu = ppu; Apu = apu; Joypad = joypad; Timer = timer; Mem = mem4 }
         | None ->
             // IME is false, but we still wake from HALT and continue execution
             executeInstruction wokenState
       else
-        // Still halted, just advance PPU
-        let (ppu, mem) = Ppu.step 4 state.Ppu state.Mem
-        { state with Ppu = ppu; Mem = mem }
+        // Still halted, just advance PPU/APU/Joypad/Timer
+        let (ppu, mem1) = Ppu.step 4 state.Ppu state.Mem
+        let (apu, mem2) = Apu.step 4 state.Apu mem1
+        let (joypad, mem3) = Joypad.sync state.Joypad mem2
+        let (timer, mem4) = Timer.step 4 state.Timer mem3
+        { state with Ppu = ppu; Apu = apu; Joypad = joypad; Timer = timer; Mem = mem4 }
     else
       // Not halted - check for interrupts first
       match handleInterrupt state with
       | Some (interruptedState, cycles) ->
-          // PPUをサイクル分進める
-          let (ppu, mem) = Ppu.step cycles interruptedState.Ppu interruptedState.Mem
-          { interruptedState with Ppu = ppu; Mem = mem }
+          // PPU・APU・Joypad・Timerを更新
+          let (ppu, mem1) = Ppu.step cycles interruptedState.Ppu interruptedState.Mem
+          let (apu, mem2) = Apu.step cycles interruptedState.Apu mem1
+          let (joypad, mem3) = Joypad.sync interruptedState.Joypad mem2
+          let (timer, mem4) = Timer.step cycles interruptedState.Timer mem3
+          { interruptedState with Ppu = ppu; Apu = apu; Joypad = joypad; Timer = timer; Mem = mem4 }
       | None ->
           // No interrupt, execute normal instruction
           executeInstruction state

@@ -15,6 +15,8 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{DF45E395
 EndProject
 Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "gbfs.Tests", "tests\gbfs.Tests\gbfs.Tests.fsproj", "{C9E200C8-B0DB-426A-B1C0-D55FE9DA549D}"
 EndProject
+Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "gbfs.McpServer", "src\gbfs.McpServer\gbfs.McpServer.fsproj", "{970A1A96-37B8-4C61-A9E1-4A5F0B25C8C9}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -73,6 +75,18 @@ Global
 		{C9E200C8-B0DB-426A-B1C0-D55FE9DA549D}.Release|x64.Build.0 = Release|Any CPU
 		{C9E200C8-B0DB-426A-B1C0-D55FE9DA549D}.Release|x86.ActiveCfg = Release|Any CPU
 		{C9E200C8-B0DB-426A-B1C0-D55FE9DA549D}.Release|x86.Build.0 = Release|Any CPU
+		{970A1A96-37B8-4C61-A9E1-4A5F0B25C8C9}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{970A1A96-37B8-4C61-A9E1-4A5F0B25C8C9}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{970A1A96-37B8-4C61-A9E1-4A5F0B25C8C9}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{970A1A96-37B8-4C61-A9E1-4A5F0B25C8C9}.Debug|x64.Build.0 = Debug|Any CPU
+		{970A1A96-37B8-4C61-A9E1-4A5F0B25C8C9}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{970A1A96-37B8-4C61-A9E1-4A5F0B25C8C9}.Debug|x86.Build.0 = Debug|Any CPU
+		{970A1A96-37B8-4C61-A9E1-4A5F0B25C8C9}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{970A1A96-37B8-4C61-A9E1-4A5F0B25C8C9}.Release|Any CPU.Build.0 = Release|Any CPU
+		{970A1A96-37B8-4C61-A9E1-4A5F0B25C8C9}.Release|x64.ActiveCfg = Release|Any CPU
+		{970A1A96-37B8-4C61-A9E1-4A5F0B25C8C9}.Release|x64.Build.0 = Release|Any CPU
+		{970A1A96-37B8-4C61-A9E1-4A5F0B25C8C9}.Release|x86.ActiveCfg = Release|Any CPU
+		{970A1A96-37B8-4C61-A9E1-4A5F0B25C8C9}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -82,6 +96,7 @@ Global
 		{1481BBD6-A6DA-4912-A03A-134880D14701} = {87F6C079-CBD7-4866-BDEB-CBDEA9E51D2A}
 		{91DD001C-8333-4A3F-B263-63A83691DAFD} = {87F6C079-CBD7-4866-BDEB-CBDEA9E51D2A}
 		{C9E200C8-B0DB-426A-B1C0-D55FE9DA549D} = {DF45E395-F800-4724-8409-30685A0CF95B}
+		{970A1A96-37B8-4C61-A9E1-4A5F0B25C8C9} = {87F6C079-CBD7-4866-BDEB-CBDEA9E51D2A}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {8CFD6033-FB8D-48BE-9628-9D83DC023CAB}

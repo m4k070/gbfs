@@ -87,4 +87,61 @@ window.requestAnimationFrameAsync = function() {
     });
 };
 
+// ====================
+// Audio
+// ====================
+
+(function() {
+    let audioCtx = null;
+    let audioQueue = [];
+    let isPlaying = false;
+    const SAMPLE_RATE = 44100;
+    const BUFFER_SIZE = 2048; // samples per channel per chunk
+
+    window.initAudio = function() {
+        if (audioCtx) return;
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
+        audioQueue = [];
+        isPlaying = false;
+        console.log('Audio initialized, sample rate:', audioCtx.sampleRate);
+    };
+
+    function playNextBuffer() {
+        if (!audioCtx || audioQueue.length === 0) {
+            isPlaying = false;
+            return;
+        }
+        isPlaying = true;
+
+        const samples = audioQueue.shift();
+        const numSamples = Math.floor(samples.length / 2); // L/R interleaved
+        const buffer = audioCtx.createBuffer(2, numSamples, SAMPLE_RATE);
+        const left = buffer.getChannelData(0);
+        const right = buffer.getChannelData(1);
+
+        for (let i = 0; i < numSamples; i++) {
+            left[i] = samples[i * 2];
+            right[i] = samples[i * 2 + 1];
+        }
+
+        const source = audioCtx.createBufferSource();
+        source.buffer = buffer;
+        source.connect(audioCtx.destination);
+        source.onended = playNextBuffer;
+        source.start();
+    }
+
+    window.queueAudioSamples = function(float32Array) {
+        if (!audioCtx) return;
+        // Keep queue bounded to avoid lag buildup
+        if (audioQueue.length > 4) {
+            audioQueue.splice(0, audioQueue.length - 2);
+        }
+        audioQueue.push(float32Array);
+        if (!isPlaying) {
+            playNextBuffer();
+        }
+    };
+})();
+
 console.log('gbfs app.js loaded');

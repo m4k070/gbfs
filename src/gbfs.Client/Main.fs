@@ -14,11 +14,11 @@ open gbfs.Lib
 // ====================
 
 type Model = {
-    EmulatorState: Decoder.CpuState
+    EmulatorState: Emulator.EmulatorState
     RomLoaded: bool
     Running: bool
     Error: string option
-    FrameCount: int
+    AudioInitialized: bool
 }
 
 type Message =
@@ -29,14 +29,29 @@ type Message =
     | RunFrame
     | SetError of string
     | Reset
+    | KeyDown of string
+    | KeyUp of string
+    | InitAudio
+
+let private mapKey (key: string) : string option =
+    match key with
+    | "ArrowUp"    -> Some "up"
+    | "ArrowDown"  -> Some "down"
+    | "ArrowLeft"  -> Some "left"
+    | "ArrowRight" -> Some "right"
+    | "z" | "Z"    -> Some "a"
+    | "x" | "X"    -> Some "b"
+    | "Enter"      -> Some "start"
+    | "Shift"      -> Some "select"
+    | _ -> None
 
 let init () : Model * Cmd<Message> =
     {
-        EmulatorState = Decoder.createState()
+        EmulatorState = Emulator.create()
         RomLoaded = false
         Running = false
         Error = None
-        FrameCount = 0
+        AudioInitialized = false
     }, Cmd.none
 
 let update (jsRuntime: IJSRuntime) (msg: Message) (model: Model) : Model * Cmd<Message> =
@@ -54,8 +69,24 @@ let update (jsRuntime: IJSRuntime) (msg: Message) (model: Model) : Model * Cmd<M
         model, Cmd.OfAsync.perform (fun () -> loadRomTask) () id
 
     | RomLoaded rom ->
-        let newState = Decoder.loadRomToState rom model.EmulatorState
-        { model with EmulatorState = newState; RomLoaded = true; Running = true; Error = None; FrameCount = 0 }, Cmd.ofMsg RunFrame
+        let newState = Emulator.loadRom rom model.EmulatorState
+        { model with EmulatorState = newState; RomLoaded = true; Running = true; Error = None },
+        Cmd.batch [
+            Cmd.ofMsg InitAudio
+            Cmd.ofMsg RunFrame
+        ]
+
+    | InitAudio ->
+        if not model.AudioInitialized then
+            let initTask = async {
+                try
+                    do! jsRuntime.InvokeVoidAsync("initAudio").AsTask() |> Async.AwaitTask
+                with _ -> ()
+                return StartEmulator // dummy message, audio init is fire-and-forget
+            }
+            { model with AudioInitialized = true }, Cmd.OfAsync.perform (fun () -> initTask) () (fun _ -> StartEmulator)
+        else
+            model, Cmd.none
 
     | StartEmulator ->
         if model.RomLoaded then
@@ -68,34 +99,54 @@ let update (jsRuntime: IJSRuntime) (msg: Message) (model: Model) : Model * Cmd<M
 
     | Reset ->
         { model with
-            EmulatorState = Decoder.createState()
+            EmulatorState = Emulator.create()
             RomLoaded = false
             Running = false
-            Error = None
-            FrameCount = 0 }, Cmd.none
+            Error = None }, Cmd.none
 
     | RunFrame ->
         if model.Running && model.RomLoaded then
-            let cyclesPerFrame = 70224
-            let newState = Decoder.run cyclesPerFrame model.EmulatorState
+            let newState = Emulator.runFrame model.EmulatorState
+
+            // Get audio samples before clearing
+            let audioSamples = Emulator.getAudioBuffer newState
+            let newState = Emulator.clearAudioBuffer newState
 
             let frameTask = async {
-                do! jsRuntime.InvokeVoidAsync("drawScreen", newState.Ppu.FrameBuffer).AsTask() |> Async.AwaitTask
+                do! jsRuntime.InvokeVoidAsync("drawScreen", newState.Cpu.Ppu.FrameBuffer).AsTask() |> Async.AwaitTask
+                if audioSamples.Length > 0 then
+                    let floatArray = audioSamples |> Array.map float32
+                    do! jsRuntime.InvokeVoidAsync("queueAudioSamples", floatArray).AsTask() |> Async.AwaitTask
                 do! jsRuntime.InvokeVoidAsync("requestAnimationFrameAsync").AsTask() |> Async.AwaitTask
                 return RunFrame
             }
             let frameCmd = Cmd.OfAsync.perform (fun () -> frameTask) () id
 
-            { model with EmulatorState = newState; FrameCount = model.FrameCount + 1 }, frameCmd
+            { model with EmulatorState = newState }, frameCmd
         else
             model, Cmd.none
 
     | SetError msg ->
         { model with Error = Some msg; Running = false }, Cmd.none
 
+    | KeyDown key ->
+        match mapKey key with
+        | Some button ->
+            { model with EmulatorState = Emulator.pressButton button model.EmulatorState }, Cmd.none
+        | None -> model, Cmd.none
+
+    | KeyUp key ->
+        match mapKey key with
+        | Some button ->
+            { model with EmulatorState = Emulator.releaseButton button model.EmulatorState }, Cmd.none
+        | None -> model, Cmd.none
+
 let view (model: Model) (dispatch: Message -> unit) =
     div {
         attr.style "font-family: sans-serif; padding: 20px; max-width: 600px; margin: 0 auto;"
+        attr.tabindex 0
+        on.keydown (fun e -> dispatch (KeyDown e.Key))
+        on.keyup (fun e -> dispatch (KeyUp e.Key))
 
         h1 {
             attr.style "color: #2c3e50; margin-bottom: 20px; text-align: center;"
@@ -160,12 +211,18 @@ let view (model: Model) (dispatch: Message -> unit) =
                 }
             }
 
+            // Controls help
+            div {
+                attr.style "font-size: 12px; color: #95a5a6; text-align: center;"
+                text "Controls: Arrow keys = D-Pad, Z = A, X = B, Enter = Start, Shift = Select"
+            }
+
             // Status
             div {
                 attr.style "font-size: 14px; color: #7f8c8d; text-align: center;"
                 if model.RomLoaded then
                     if model.Running then
-                        text $"Status: Running (Frame: {model.FrameCount})"
+                        text $"Status: Running (Frame: {model.EmulatorState.FrameCount})"
                     else
                         text "Status: ROM loaded, press Start to begin"
                 else
