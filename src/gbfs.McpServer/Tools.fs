@@ -3,12 +3,31 @@ namespace gbfs.McpServer
 open System
 open System.ComponentModel
 open System.IO
+open System.Net.Http
+open System.Threading.Tasks
 open ModelContextProtocol.Server
 open gbfs.Lib
 
 /// Mutable emulator state held in-process
 module EmulatorHolder =
     let mutable state = Emulator.create()
+
+module FrameRelay =
+    let private client = new HttpClient()
+    let private baseUrl =
+        match Environment.GetEnvironmentVariable("GBFS_SERVER_URL") with
+        | null | "" -> "http://localhost:5032"
+        | url -> url
+
+    let postFrame () : Task =
+        task {
+            try
+                let fb = Emulator.getFrameBuffer EmulatorHolder.state
+                use content = new ByteArrayContent(fb)
+                let! _ = client.PostAsync(baseUrl + "/api/mcp/frame", content)
+                ()
+            with _ -> ()
+        }
 
 [<McpServerToolType>]
 type EmulatorTools() =
@@ -32,28 +51,34 @@ type EmulatorTools() =
 
     [<McpServerTool>]
     [<Description("Run the emulator for N frames (default 1)")>]
-    static member run_frames([<Description("Number of frames to run (default 1)")>] count: int) : string =
-        let n = if count <= 0 then 1 else count
-        EmulatorHolder.state <- Emulator.runFrames n EmulatorHolder.state
-        let s = EmulatorHolder.state
-        sprintf "Ran %d frame(s). Total frames: %d, Total cycles: %d" n s.FrameCount s.TotalCycles
+    static member run_frames([<Description("Number of frames to run (default 1)")>] count: int) : Task<string> =
+        task {
+            let n = if count <= 0 then 1 else count
+            EmulatorHolder.state <- Emulator.runFrames n EmulatorHolder.state
+            do! FrameRelay.postFrame()
+            let s = EmulatorHolder.state
+            return sprintf "Ran %d frame(s). Total frames: %d, Total cycles: %d" n s.FrameCount s.TotalCycles
+        }
 
     [<McpServerTool>]
     [<Description("Press buttons, run N frames, then release. Simulates a button press action.")>]
     static member press_buttons(
         [<Description("Button names: up, down, left, right, a, b, start, select")>] buttons: string array,
-        [<Description("Number of frames to hold the buttons (default 1)")>] frames: int) : string =
-        let n = if frames <= 0 then 1 else frames
-        // Press buttons
-        for b in buttons do
-            EmulatorHolder.state <- Emulator.pressButton b EmulatorHolder.state
-        // Run frames
-        EmulatorHolder.state <- Emulator.runFrames n EmulatorHolder.state
-        // Release buttons
-        for b in buttons do
-            EmulatorHolder.state <- Emulator.releaseButton b EmulatorHolder.state
-        let buttonStr = String.Join(", ", buttons)
-        sprintf "Pressed [%s] for %d frame(s). Frame: %d" buttonStr n EmulatorHolder.state.FrameCount
+        [<Description("Number of frames to hold the buttons (default 1)")>] frames: int) : Task<string> =
+        task {
+            let n = if frames <= 0 then 1 else frames
+            // Press buttons
+            for b in buttons do
+                EmulatorHolder.state <- Emulator.pressButton b EmulatorHolder.state
+            // Run frames
+            EmulatorHolder.state <- Emulator.runFrames n EmulatorHolder.state
+            // Release buttons
+            for b in buttons do
+                EmulatorHolder.state <- Emulator.releaseButton b EmulatorHolder.state
+            do! FrameRelay.postFrame()
+            let buttonStr = String.Join(", ", buttons)
+            return sprintf "Pressed [%s] for %d frame(s). Frame: %d" buttonStr n EmulatorHolder.state.FrameCount
+        }
 
     [<McpServerTool>]
     [<Description("Get the current screen as ASCII art (160x144)")>]

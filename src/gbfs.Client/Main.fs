@@ -141,6 +141,7 @@ let update (jsRuntime: IJSRuntime) (msg: Message) (model: Model) : Model * Cmd<M
             { model with EmulatorState = Emulator.releaseButton button model.EmulatorState }, Cmd.none
         | None -> model, Cmd.none
 
+
 let view (model: Model) (dispatch: Message -> unit) =
     div {
         attr.style "font-family: sans-serif; padding: 20px; max-width: 600px; margin: 0 auto;"

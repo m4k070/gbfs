@@ -36,6 +36,7 @@ let page = doctypeHtml {
             attr.id "main"
             comp<Client.Main.EmulatorApp> { attr.renderMode RenderMode.InteractiveWebAssembly }
         }
+        script { attr.src "js/app.js" }
         boleroScript
     }
 }

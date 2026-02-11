@@ -144,4 +144,75 @@ window.requestAnimationFrameAsync = function() {
     };
 })();
 
+// ====================
+// MCP Watch (polling)
+// ====================
+
+(function() {
+    let mcpTimerId = null;
+    let watching = false;
+
+    window.startMcpWatch = function(intervalMs) {
+        if (mcpTimerId !== null) return;
+        watching = true;
+        mcpTimerId = setInterval(async function() {
+            try {
+                const resp = await fetch('/api/mcp/frame');
+                if (resp.status !== 200) return;
+                const buf = await resp.arrayBuffer();
+                const byteArray = new Uint8Array(buf);
+                window.drawScreen(byteArray);
+            } catch (_) {}
+        }, intervalMs || 50);
+        updateMcpButton();
+    };
+
+    window.stopMcpWatch = function() {
+        if (mcpTimerId !== null) {
+            clearInterval(mcpTimerId);
+            mcpTimerId = null;
+        }
+        watching = false;
+        updateMcpButton();
+    };
+
+    window.toggleMcpWatch = function() {
+        if (watching) {
+            window.stopMcpWatch();
+        } else {
+            window.startMcpWatch(50);
+        }
+    };
+
+    function updateMcpButton() {
+        const btn = document.getElementById('mcp-watch-btn');
+        if (!btn) return;
+        if (watching) {
+            btn.textContent = 'Stop MCP Watch';
+            btn.style.background = '#e74c3c';
+        } else {
+            btn.textContent = 'Watch MCP';
+            btn.style.background = '#9b59b6';
+        }
+    }
+
+    // Insert MCP Watch button after DOM is ready
+    function insertMcpButton() {
+        const buttons = document.querySelector('div[style*="display: flex; gap: 10px"]');
+        if (!buttons) { setTimeout(insertMcpButton, 200); return; }
+        if (document.getElementById('mcp-watch-btn')) return;
+        const btn = document.createElement('button');
+        btn.id = 'mcp-watch-btn';
+        btn.textContent = 'Watch MCP';
+        btn.style.cssText = 'padding: 10px 20px; font-size: 14px; cursor: pointer; background: #9b59b6; color: white; border: none; border-radius: 5px;';
+        btn.onclick = window.toggleMcpWatch;
+        buttons.appendChild(btn);
+    }
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', insertMcpButton);
+    } else {
+        insertMcpButton();
+    }
+})();
+
 console.log('gbfs app.js loaded');

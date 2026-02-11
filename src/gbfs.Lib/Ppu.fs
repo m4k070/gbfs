@@ -296,7 +296,7 @@ module Ppu =
                     if s1.XPos <> s2.XPos then compare s1.XPos s2.XPos
                     else compare s1.OAMIndex s2.OAMIndex
                 )
-                |> List.take 10 // Limit to 10 sprites per scanline
+                |> List.truncate 10 // Limit to 10 sprites per scanline
 
             currentPpuState <- renderSprites currentPpuState mem lcdc obp0 obp1 visibleSprites
         
