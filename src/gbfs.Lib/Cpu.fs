@@ -95,7 +95,7 @@ module Cpu =
     let left = regs |> getRegisterValue (R8 A)
     let right = regs |> getRegisterValue (R8 b)
     let s = left + right
-    let z = (s = 0us)
+    let z = (s &&& 0xFFus) = 0us  // 0xFF を超える和 (例 0x3A + 0xC6 = 0x100) も A には 0 が入る
     let hc = hasHalfCarryAdd8 left right
     let c = (left + right) > 0xFFus
     regs |> setRegisterValue (R8 A) s |> setFlag z false hc c
@@ -112,7 +112,7 @@ module Cpu =
   let AddN8 b regs =
     let a = getRegisterValue (R8 A) regs
     let s = a + b
-    let z = (s = 0us)
+    let z = (s &&& 0xFFus) = 0us  // 0xFF を超える和も A には下位 8bit が入る
     let hc = hasHalfCarryAdd8 a b
     let c = (a + b) > 0xFFus
     regs |> setRegisterValue (R8 A) s |> setFlag z false hc c
@@ -129,7 +129,7 @@ module Cpu =
     let left = getRegisterValue (R8 A) regs
     let right = getRegisterValue (R8 b) regs
     let s = left - right
-    let z = (s = 0us)
+    let z = (s &&& 0xFFus) = 0us  // SubN8 / SbcR と同じく下位 8bit で判定する
     let hc = hasHalfCarrySub8 left right
     let c = left < right
     regs |> setRegisterValue (R8 A) s |> setFlag z true hc c
