@@ -242,6 +242,9 @@ module Decoder =
     Joypad: Joypad.JoypadState
     Timer: Timer.TimerState
     Ime: bool  // Interrupt Master Enable
+    /// EI の効果は 1 命令遅れる: EI はこれを立て、次の命令の実行前に Ime へ反映する
+    /// (その命令の実行後に割込み判定が行われる。EI; DI なら割込みは起きない)
+    ImeScheduled: bool
     Halted: bool
   }
 
@@ -253,6 +256,7 @@ module Decoder =
     Joypad = Joypad.create()
     Timer = Timer.create()
     Ime = false
+    ImeScheduled = false
     Halted = false
   }
 
@@ -415,6 +419,7 @@ module Decoder =
           stateWithPushedPC with
             Regs = { stateWithPushedPC.Regs with PC = vector }
             Ime = false
+            ImeScheduled = false
             Halted = false // Wake from HALT
         }
 
@@ -426,6 +431,8 @@ module Decoder =
 
   /// Executes a single instruction and returns the new state with PPU updated
   let private executeInstruction (state: CpuState) : CpuState =
+    // 直前の命令が EI なら、この命令の実行前に IME を立てる (割込み判定は次の step の先頭)
+    let state = if state.ImeScheduled then { state with Ime = true; ImeScheduled = false } else state
     let opcode = readByte state.Regs.PC state
 
     // 命令の実行とサイクル計算
@@ -887,8 +894,8 @@ module Decoder =
             (newState, 4)
         
         // Interrupts
-        | Di -> ({ (advancePc 1 state) with Ime = false }, 4)
-        | Ei -> ({ (advancePc 1 state) with Ime = true }, 4)
+        | Di -> ({ (advancePc 1 state) with Ime = false; ImeScheduled = false }, 4)
+        | Ei -> ({ (advancePc 1 state) with ImeScheduled = true }, 4)
 
         // STOP (0x10): halt CPU & LCD until button press
         | Stop -> (advancePc 2 state, 4) // Skip next byte (0x00)

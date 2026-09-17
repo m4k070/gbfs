@@ -462,3 +462,46 @@ module InterruptDispatchTests =
         let highByte = read 0xFFFDus finalState.Mem
         let returnAddr = uint16 lowByte ||| (uint16 highByte <<< 8)
         Assert.Equal(0x1234us, returnAddr)
+
+// ====================
+// EI の遅延 (EI の効果は次の命令の実行後に現れる)
+// ====================
+
+module EiDelayTests =
+    /// 0x0100 から program を置き、IE / IF を設定した状態 (IME=false、SP=0xFFFE)
+    let setupProgram (program: byte list) (ie: byte) (ifReg: byte) =
+        let rom = Array.zeroCreate 0x200
+        List.iteri (fun i b -> rom.[0x100 + i] <- b) program
+        let state = initCpuState ()
+        let state = { state with Regs = { state.Regs with PC = 0x0100us; SP = 0xFFFEus } }
+        let state = loadRomToState rom state
+        { state with Mem = state.Mem |> write 0xFFFFus ie |> write 0xFF0Fus ifReg }
+
+    [<Fact>]
+    let ``EI takes effect only after the next instruction`` () =
+        // EI; NOP — 要因が既にあっても、割込みは NOP を実行した後に受け付ける (wwc の sm83_full 仕様テストで発見)
+        let state = setupProgram [ 0xFBuy; 0x00uy; 0x00uy ] 0x01uy 0x01uy
+
+        let afterEi = step state
+        Assert.False(afterEi.Ime)
+        Assert.Equal(0x0101us, afterEi.Regs.PC)
+
+        let afterNop = step afterEi
+        Assert.True(afterNop.Ime)
+        Assert.Equal(0x0102us, afterNop.Regs.PC)
+
+        let dispatched = step afterNop
+        Assert.Equal(0x0040us, dispatched.Regs.PC)
+        // 戻り番地は NOP の次 (0x0102)
+        let returnAddr = uint16 (read 0xFFFCus dispatched.Mem) ||| (uint16 (read 0xFFFDus dispatched.Mem) <<< 8)
+        Assert.Equal(0x0102us, returnAddr)
+
+    [<Fact>]
+    let ``EI immediately followed by DI never enables interrupts`` () =
+        let state = setupProgram [ 0xFBuy; 0xF3uy; 0x00uy ] 0x01uy 0x01uy
+
+        let finalState = state |> step |> step |> step
+
+        Assert.False(finalState.Ime)
+        Assert.Equal(0x0103us, finalState.Regs.PC)
+        Assert.Equal(0xFFFEus, finalState.Regs.SP)
