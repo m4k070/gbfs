@@ -246,6 +246,9 @@ module Decoder =
     /// (その命令の実行後に割込み判定が行われる。EI; DI なら割込みは起きない)
     ImeScheduled: bool
     Halted: bool
+    /// HALT バグ (Pan Docs): IME=0 で要因がある状態の HALT は停止せず、PC は HALT 自身を指したまま。
+    /// 次の命令は PC+1 から読み、PC を基点に実行するので HALT の次のバイトが 2 回読まれる
+    HaltBug: bool
   }
 
   let createState () = {
@@ -258,6 +261,7 @@ module Decoder =
     Ime = false
     ImeScheduled = false
     Halted = false
+    HaltBug = false
   }
 
   let loadRomToState (rom: byte array) (state: CpuState) =
@@ -421,6 +425,7 @@ module Decoder =
             Ime = false
             ImeScheduled = false
             Halted = false // Wake from HALT
+            HaltBug = false // EI 直後の HALT バグ: PC は HALT 自身を指しており、それが戻り番地になる
         }
 
         Some (finalState, 20) // Interrupt handling takes 20 cycles
@@ -432,14 +437,23 @@ module Decoder =
   /// Executes a single instruction and returns the new state with PPU updated
   let private executeInstruction (state: CpuState) : CpuState =
     // 直前の命令が EI なら、この命令の実行前に IME を立てる (割込み判定は次の step の先頭)
+    let imeJustEnabled = state.ImeScheduled
     let state = if state.ImeScheduled then { state with Ime = true; ImeScheduled = false } else state
-    let opcode = readByte state.Regs.PC state
+    // HALT バグ中は PC が HALT 自身を指すので、命令は PC+1 から読む (オペランドや PC の更新は PC 基点のまま)
+    let opcodeAddr = if state.HaltBug then state.Regs.PC + 1us else state.Regs.PC
+    let opcode = readByte opcodeAddr state
+    let state = { state with HaltBug = false }
 
     // 命令の実行とサイクル計算
     let (newState, cycles) =
       match opcode with
       | Nop -> (advancePc 1 state, 4)
-        | Halt -> ({ (advancePc 1 state) with Halted = true }, 4)
+        | Halt ->
+            // IME=0 (直前の EI で今立ったばかりも含む) で要因があると、停止せず PC も進めない (HALT バグ)
+            if (not state.Ime || imeJustEnabled) && getPendingInterrupts state <> 0uy then
+              ({ state with HaltBug = true }, 4)
+            else
+              ({ (advancePc 1 state) with Halted = true }, 4)
         | CBPrefixed ->
             let stateAfterPC = advancePc 1 state
             let (s, c) = stepCb stateAfterPC

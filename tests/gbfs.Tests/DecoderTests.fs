@@ -505,3 +505,34 @@ module EiDelayTests =
         Assert.False(finalState.Ime)
         Assert.Equal(0x0103us, finalState.Regs.PC)
         Assert.Equal(0xFFFEus, finalState.Regs.SP)
+
+// ====================
+// HALT バグ (IME=0 で要因がある HALT は停止せず、次のバイトが 2 回読まれる)
+// ====================
+
+module HaltBugTests =
+    [<Fact>]
+    let ``HALT with IME=0 and pending interrupt reads the next byte twice`` () =
+        // HALT; INC A — INC A が 2 回実行される
+        let state = EiDelayTests.setupProgram [ 0x76uy; 0x3Cuy; 0x00uy ] 0x01uy 0x01uy
+        let a0 = getRegisterValue (R8 A) state.Regs
+
+        let afterHalt = step state
+        Assert.False(afterHalt.Halted)
+        Assert.Equal(0x0100us, afterHalt.Regs.PC)
+
+        let afterFirstInc = step afterHalt
+        Assert.Equal(0x0101us, afterFirstInc.Regs.PC)
+        let afterSecondInc = step afterFirstInc
+        Assert.Equal(0x0102us, afterSecondInc.Regs.PC)
+        Assert.Equal((a0 + 2us) &&& 0xFFus, getRegisterValue (R8 A) afterSecondInc.Regs)
+
+    [<Fact>]
+    let ``EI immediately before HALT services the interrupt and returns to the HALT`` () =
+        let state = EiDelayTests.setupProgram [ 0xFBuy; 0x76uy; 0x00uy ] 0x01uy 0x01uy
+
+        let dispatched = state |> step |> step |> step
+
+        Assert.Equal(0x0040us, dispatched.Regs.PC)
+        let returnAddr = uint16 (read 0xFFFCus dispatched.Mem) ||| (uint16 (read 0xFFFDus dispatched.Mem) <<< 8)
+        Assert.Equal(0x0101us, returnAddr)
