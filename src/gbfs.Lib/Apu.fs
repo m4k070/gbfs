@@ -51,10 +51,11 @@ module Apu =
     let FRAME_SEQ_PERIOD = 8192 // CPU cycles per frame sequencer tick (512 Hz)
 
     /// Duty cycle waveforms (8 steps each)
-    /// 0: 12.5% - 00000001
-    /// 1: 25%   - 00000011
-    /// 2: 50%   - 00001111
-    /// 3: 75%   - 11111100
+    /// nocash Pan Docs の波形 (`_`=high) の回転で、比率は 12.5/25/50/75%。
+    /// 0: 12.5%  00000001
+    /// 1: 25%    10000001
+    /// 2: 50%    10000111
+    /// 3: 75%    01111110
     let private dutyTable = [|
         [| 0uy; 0uy; 0uy; 0uy; 0uy; 0uy; 0uy; 1uy |] // 12.5%
         [| 1uy; 0uy; 0uy; 0uy; 0uy; 0uy; 0uy; 1uy |] // 25%

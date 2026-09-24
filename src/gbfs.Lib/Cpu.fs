@@ -538,10 +538,3 @@ module Cpu =
       HL = 0x014Dus
       PC = 0x0100us  // エントリポイント
       SP = 0xFFFEus }
-
-  // HALT状態
-  let mutable Halted = false
-
-  let Halt regs =
-    Halted <- true
-    regs

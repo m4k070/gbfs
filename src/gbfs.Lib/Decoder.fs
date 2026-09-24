@@ -93,14 +93,16 @@ module Decoder =
     else
       None
 
-  // LD A,(BC) - 0x0A
-  let (|LdABC|_|) (opcode: uint8) = if opcode = 0x0Auy then Some() else None
-  // LD A,(DE) - 0x1A
-  let (|LdADE|_|) (opcode: uint8) = if opcode = 0x1Auy then Some() else None
-  // LD (BC),A - 0x02
-  let (|LdBCA|_|) (opcode: uint8) = if opcode = 0x02uy then Some() else None
-  // LD (DE),A - 0x12
-  let (|LdDEA|_|) (opcode: uint8) = if opcode = 0x12uy then Some() else None
+  // LD A,(rr) - 0x0A(BC), 0x1A(DE)
+  let (|LdAIRr|_|) (opcode: uint8) =
+    if opcode = 0x0Auy then Some(Cpu.BC)
+    elif opcode = 0x1Auy then Some(Cpu.DE)
+    else None
+  // LD (rr),A - 0x02(BC), 0x12(DE)
+  let (|LdIRrA|_|) (opcode: uint8) =
+    if opcode = 0x02uy then Some(Cpu.BC)
+    elif opcode = 0x12uy then Some(Cpu.DE)
+    else None
   // LD A,(HL+) - 0x2A
   let (|LdAHLI|_|) (opcode: uint8) = if opcode = 0x2Auy then Some() else None
   // LD A,(HL-) - 0x3A
@@ -457,7 +459,9 @@ module Decoder =
         | CBPrefixed ->
             let stateAfterPC = advancePc 1 state
             let (s, c) = stepCb stateAfterPC
-            (s, c + 4) // CB命令自体のサイクル(4)を追加
+            // stepCb はフェッチ後の実行サイクル(reg=8/(HL)=16/BIT(HL)=12)を返す
+            // CB プリフィックス自体のサイクルも含まれているため追加加算はしない
+            (s, c)
 
         // 8-bit Load
         | LdRR (dst_idx, src_idx) ->
@@ -497,27 +501,15 @@ module Decoder =
             let newState = setRegs (Cpu.LoadN16 reg imm s.Regs) s
             (newState, 12)
 
-        | LdABC ->
+        | LdAIRr reg ->
             let s = advancePc 1 state
-            let addr = Cpu.getRegisterValue (R16 BC) s.Regs
+            let addr = Cpu.getRegisterValue (R16 reg) s.Regs
             let value = readByte addr s
             let newState = setRegs (Cpu.LoadN8 A (uint16 value) s.Regs) s
             (newState, 8)
-        | LdADE ->
+        | LdIRrA reg ->
             let s = advancePc 1 state
-            let addr = Cpu.getRegisterValue (R16 DE) s.Regs
-            let value = readByte addr s
-            let newState = setRegs (Cpu.LoadN8 A (uint16 value) s.Regs) s
-            (newState, 8)
-        | LdBCA ->
-            let s = advancePc 1 state
-            let addr = Cpu.getRegisterValue (R16 BC) s.Regs
-            let value = Cpu.getRegisterValue (R8 A) s.Regs
-            let newState = writeByte addr (byte value) s
-            (newState, 8)
-        | LdDEA ->
-            let s = advancePc 1 state
-            let addr = Cpu.getRegisterValue (R16 DE) s.Regs
+            let addr = Cpu.getRegisterValue (R16 reg) s.Regs
             let value = Cpu.getRegisterValue (R8 A) s.Regs
             let newState = writeByte addr (byte value) s
             (newState, 8)
