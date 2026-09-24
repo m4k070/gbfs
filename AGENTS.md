@@ -12,7 +12,8 @@ GameBoy emulator written in F#. Four projects in `src/`:
 - **gbfs.McpServer** - MCP Server for AI-driven game play (stdio transport)
 
 Web UI (Bolero) was removed; `gbfs.Desktop` is the interactive UI. A future web UI
-should be added as a new API contract on `gbfs.Server`, not by reviving Bolero.
+should be added as a new API contract on `gbfs.Server`, not by reviving Bolero —
+the contract is specified in `docs/web-api.md`.
 
 ## Build Commands
 
