@@ -18,6 +18,77 @@ open Microsoft.FSharp.NativeInterop
 open gbfs.Lib
 
 // ============================================================
+// AudioOut — Lib の APU サンプル (44100Hz L/R float) を OpenAL へ queue
+// ============================================================
+
+module AudioOut =
+    open Silk.NET.OpenAL
+
+    type T =
+        | Unavailable of reason: string
+        | Ready of
+            al: AL *
+            source: uint *
+            buffers: uint array
+
+    let create () : T =
+        try
+            let alc = ALContext.GetApi()
+            let device = alc.OpenDevice(null)
+            if obj.ReferenceEquals(device, null) then
+                Unavailable "no OpenAL device"
+            else
+                let ctx = alc.CreateContext(device, NativePtr.ofNativeInt 0n)
+                alc.MakeContextCurrent(ctx)
+                let al = AL.GetApi()
+                let source = al.GenSource()
+                let buffers = Array.init 4 (fun _ -> al.GenBuffer())
+                // 再生開始直後に processed が無いと止まるため、無音で初期キュー
+                let silence = Array.zeroCreate<int16> 1470 // 1 tick (16.6ms) 分
+                for b in buffers do
+                    al.BufferData(b, BufferFormat.Stereo16, silence, Apu.SAMPLE_RATE)
+                al.SourceQueueBuffers(source, buffers)
+                al.SourcePlay(source)
+                Ready(al, source, buffers)
+        with ex ->
+            Unavailable ex.Message
+
+    let private toPcm16 (samples: float array) : int16[] =
+        Array.init samples.Length (fun i ->
+            let v = max -1.0 (min 1.0 samples.[i])
+            int16 (v * 32000.0))
+
+    /// processed バッファを回収して新しいサンプルで埋め直す
+    let queue (t: T) (samples: float array) : unit =
+        match t with
+        | Unavailable _ -> ()
+        | Ready(al, source, _) when samples.Length > 0 ->
+            let mutable processed = 0
+            al.GetSourceProperty(source, GetSourceInteger.BuffersProcessed, &processed)
+            if processed > 0 then
+                let pcm = toPcm16 samples
+                let recycled = Array.zeroCreate<uint32> processed
+                al.SourceUnqueueBuffers(source, recycled)
+                for b in recycled do
+                    al.BufferData(b, BufferFormat.Stereo16, pcm, Apu.SAMPLE_RATE)
+                    al.SourceQueueBuffers(source, [| b |])
+            let mutable v = 0
+            al.GetSourceProperty(source, GetSourceInteger.SourceState, &v)
+            if enum<SourceState> v <> SourceState.Playing then
+                al.SourcePlay(source)
+        | _ -> ()
+
+    let dispose (t: T) : unit =
+        match t with
+        | Unavailable _ -> ()
+        | Ready(al, source, buffers) ->
+            try
+                al.SourceStop(source)
+                for b in buffers do al.DeleteBuffer(b)
+                al.DeleteSource(source)
+            with _ -> ()
+
+// ============================================================
 // MVU (Model / Message / update) — Main.fs から移植可能な形
 // ============================================================
 
@@ -64,12 +135,15 @@ let tryLoadRom (path: string) (model: Model) : Model =
     with ex ->
         { model with Error = Some $"ROM load failed: %s{ex.Message}" }
 
-let update (msg: Msg) (model: Model) : Model =
+let update (audio: AudioOut.T) (msg: Msg) (model: Model) : Model =
     match msg with
     | Start when model.RomPath.IsSome -> { model with Running = true }
     | Stop -> { model with Running = false }
     | Tick when model.Running ->
-        { model with State = Emulator.runFrame model.State }
+        let s = Emulator.runFrame model.State
+        let samples = Emulator.getAudioBuffer s
+        AudioOut.queue audio samples
+        { model with State = Emulator.clearAudioBuffer s }
     | Press button when model.Running ->
         { model with State = Emulator.pressButton button model.State }
     | Release button when model.Running ->
@@ -108,6 +182,8 @@ type MainWindow() as this =
     let startBtn = Button(Content = "Start")
     let stopBtn = Button(Content = "Stop")
 
+    let audio = AudioOut.create ()
+
     let renderFrame () =
         let fb = Emulator.getFrameBuffer model.State
         if fb.Length >= 160 * 144 then
@@ -133,11 +209,17 @@ type MainWindow() as this =
                 + $" | Frame %d{st.FrameCount} | PC=0x%04X{st.Cpu.Regs.PC}"
                 + $" | %s{Path.GetFileName p}"
             | None -> "No ROM (pass a .gb path as argv[0], or put test.gb in cwd)"
-        errorText.Text <- model.Error |> Option.defaultValue ""
+        errorText.Text <-
+            [ model.Error |> Option.defaultValue ""
+              match audio with
+              | AudioOut.Unavailable r -> $"audio unavailable: %s{r}"
+              | _ -> "" ]
+            |> List.filter (fun s -> s <> "")
+            |> String.concat " | "
 
     let dispatch msg =
         let wasRunning = model.Running
-        model <- update msg model
+        model <- update audio msg model
         if msg = Tick && model.Running then renderFrame ()
         if (msg <> Tick) || (model.Running <> wasRunning) then refresh ()
 
@@ -190,7 +272,7 @@ type MainWindow() as this =
         | None -> ()
 
         refresh ()
-        if model.RomPath.IsSome then model <- update Start model
+        // ROM 読込では自動再生しない (起動直後に音が鳴るのを防ぐ) — Start は手動
         refresh ()
         timer.Start()
 
@@ -199,6 +281,10 @@ type MainWindow() as this =
         // Space で Start/Stop トグル (キー入力と干渉しない機能確認用)
         if e.Key = Key.Space then
             dispatch (if model.Running then Stop else Start)
+
+    override _.OnClosed(_) =
+        AudioOut.dispose audio
+        timer.Stop()
 
 type App() =
     inherit Application()

@@ -44,11 +44,12 @@
               xorg.libXdamage
               xorg.libXcomposite
               xorg.libXtst
+              openal
             ];
 
-            # libSkiaSharp / Avalonia が探す共有ライブラリの探索パス
+            # libSkiaSharp / Avalonia / OpenAL が探す共有ライブラリの探索パス
             shellHook = ''
-              export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath (with pkgs; [ fontconfig libxkbcommon libGL wayland xorg.libX11 xorg.libXext xorg.libXrandr xorg.libXi xorg.libXcursor xorg.libICE xorg.libSM xorg.libXrender xorg.libXfixes xorg.libXdamage xorg.libXcomposite xorg.libXtst ])}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+              export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath (with pkgs; [ fontconfig libxkbcommon libGL wayland xorg.libX11 xorg.libXext xorg.libXrandr xorg.libXi xorg.libXcursor xorg.libICE xorg.libSM xorg.libXrender xorg.libXfixes xorg.libXdamage xorg.libXcomposite xorg.libXtst openal ])}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
               # nixストア内のdotnet-sdkのパスをDOTNET_ROOTに設定する
               export DOTNET_ROOT="${pkgs.dotnet-sdk_8}/share/dotnet";
               
