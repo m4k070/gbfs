@@ -8,30 +8,56 @@ open Joypad
 open Timer
 open Decoder
 
+
+/// Resolve a CpuKind tag to its concrete CpuCore implementation.
+module CpuImpl =
+    let ofKind (kind: CpuKind) : CpuCore =
+        match kind with
+        | Native ->
+            { Step = Decoder.step; CreateState = Decoder.createState; LoadRom = Decoder.loadRomToState }
+        | WireLevel ->
+            WireLevelCpu.core
 module Emulator =
 
+
+    // Serialized state — CpuKind is a DU tag (serializable), not a function record.
     type EmulatorState = {
         Cpu: Decoder.CpuState
+        CpuKind: CpuKind
         FrameCount: int
         TotalCycles: int64
     }
+
+    /// Resolve the CPU implementation for this state.
+    let private implOf (state: EmulatorState) = CpuImpl.ofKind state.CpuKind
 
     // ============================================================
     // Lifecycle
     // ============================================================
 
-    let create () = {
-        Cpu = Decoder.createState()
-        FrameCount = 0
-        TotalCycles = 0L
-    }
+    /// Create a new emulator state with the native F# SM83 CPU.
+    let create () =
+        let impl = CpuImpl.ofKind Native
+        { Cpu = impl.CreateState()
+          CpuKind = Native
+          FrameCount = 0
+          TotalCycles = 0L }
+
+    /// Create a new emulator state with the specified CPU kind.
+    let createWith (kind: CpuKind) =
+        let impl = CpuImpl.ofKind kind
+        { Cpu = impl.CreateState()
+          CpuKind = kind
+          FrameCount = 0
+          TotalCycles = 0L }
 
     let loadRom (rom: byte array) (state: EmulatorState) =
-        { state with Cpu = Decoder.loadRomToState rom state.Cpu }
+        { state with Cpu = (implOf state).LoadRom rom state.Cpu }
 
     let reset (state: EmulatorState) =
+        let impl = implOf state
         { state with
-            Cpu = Decoder.createState()
+            Cpu = impl.CreateState()
             FrameCount = 0
             TotalCycles = 0L }
 
@@ -41,31 +67,29 @@ module Emulator =
 
     /// Execute a single CPU step (one instruction or one HALT cycle)
     let step (state: EmulatorState) =
-        let newCpu = Decoder.step state.Cpu
+        let newCpu = (implOf state).Step state.Cpu
         { state with Cpu = newCpu }
 
     /// Run for one frame (until VBlank, ~70224 cycles).
     /// Detects frame boundary by watching LY wrap from 143+ back to 0.
     let runFrame (state: EmulatorState) =
+        let impl = implOf state
         let mutable cpu = state.Cpu
         let mutable steps = 0
-        let maxSteps = 70224 // safety limit (1 step = at least 4 cycles, so max ~17556 instructions)
-        let prevLY = cpu.Ppu.LY
+        let maxSteps = 70224
         let mutable passedVBlank = false
 
         while steps < maxSteps && not passedVBlank do
             let oldLY = cpu.Ppu.LY
-            cpu <- Decoder.step cpu
+            cpu <- impl.Step cpu
             steps <- steps + 1
-            // Detect when LY wraps from 143 (end of visible) or higher back to scanline 0
-            // This indicates a new frame has started
             if oldLY > 0uy && cpu.Ppu.LY = 0uy then
                 passedVBlank <- true
 
         { state with
             Cpu = cpu
             FrameCount = state.FrameCount + 1
-            TotalCycles = state.TotalCycles + int64 (steps * 4) } // approximate
+            TotalCycles = state.TotalCycles + int64 (steps * 4) }
 
     /// Run N frames
     let runFrames (count: int) (state: EmulatorState) =
@@ -103,10 +127,10 @@ module Emulator =
                 let pixel = fb.[y * 160 + x]
                 let ch =
                     match pixel with
-                    | 0uy -> ' '   // lightest
-                    | 1uy -> '.'   // light
-                    | 2uy -> 'o'   // dark
-                    | _   -> '#'   // darkest
+                    | 0uy -> ' '
+                    | 1uy -> '.'
+                    | 2uy -> 'o'
+                    | _   -> '#'
                 sb.Append(ch) |> ignore
             sb.AppendLine() |> ignore
         sb.ToString()

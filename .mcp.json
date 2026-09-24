@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "gbfs-emulator": {
+      "command": "dotnet",
+      "args": ["run", "--project", "src/gbfs.McpServer"],
+      "cwd": "/home/makoto/work/gbfs"
+    }
+  }
+}

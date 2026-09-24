@@ -1,16 +1,9 @@
 module gbfs.Server.Program
 
 open System.Threading
-open Microsoft.AspNetCore
 open Microsoft.AspNetCore.Builder
-open Microsoft.AspNetCore.Hosting
 open Microsoft.AspNetCore.Http
-open Microsoft.Extensions.DependencyInjection
 open Microsoft.Extensions.Hosting
-open Bolero
-open Bolero.Server
-open gbfs
-open Bolero.Templating.Server
 
 module McpFrameStore =
     let private frameBuffer: byte array = Array.zeroCreate (160 * 144)
@@ -28,36 +21,15 @@ module McpFrameStore =
         else
             None
 
+/// gbfs.Server: MCP frame relay のホストのみ。
+/// UI は gbfs.Desktop (Avalonia)。Web UI (Bolero) は廃止済み — 将来の
+/// Web UI を足す場合はここに API 契約を追加する想定。
 [<EntryPoint>]
 let main args =
     let builder = WebApplication.CreateBuilder(args)
-
-    builder.Services.AddRazorComponents()
-        .AddInteractiveServerComponents()
-        .AddInteractiveWebAssemblyComponents()
-    |> ignore
-    builder.Services.AddServerSideBlazor() |> ignore
-    builder.Services.AddBoleroComponents() |> ignore
-#if DEBUG
-    builder.Services.AddHotReload(templateDir = __SOURCE_DIRECTORY__ + "/../gbfs.Client") |> ignore
-#endif
-
     let app = builder.Build()
 
-    if app.Environment.IsDevelopment() then
-        app.UseWebAssemblyDebugging()
-
-    app
-        .UseStaticFiles()
-        .UseRouting()
-        .UseAntiforgery()
-    |> ignore
-
-#if DEBUG
-    app.UseHotReload()
-#endif
-
-    // MCP frame relay endpoints
+    // MCP frame relay endpoints (gbfs.McpServer の FrameRelay が利用)
     app.MapPost("/api/mcp/frame", fun (ctx: HttpContext) ->
         task {
             use ms = new System.IO.MemoryStream()
@@ -75,16 +47,9 @@ let main args =
             | Some data ->
                 ctx.Response.ContentType <- "application/octet-stream"
                 do! ctx.Response.Body.WriteAsync(data, 0, data.Length)
-            | None ->
-                ctx.Response.StatusCode <- 204
+            | None -> ctx.Response.StatusCode <- 204
         } :> System.Threading.Tasks.Task
     ) |> ignore
-
-    app.MapRazorComponents<Index.Page>()
-        .AddInteractiveServerRenderMode()
-        .AddInteractiveWebAssemblyRenderMode()
-        .AddAdditionalAssemblies(typeof<Client.Main.EmulatorApp>.Assembly)
-    |> ignore
 
     app.Run()
     0

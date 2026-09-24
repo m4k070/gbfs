@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
@@ -14,6 +14,8 @@
     <Compile Include="Cpu.fs" />
     <Compile Include="CBPrefix.fs" />
     <Compile Include="Decoder.fs" />
+    <Compile Include="CpuCore.fs" />
+    <Compile Include="WireLevelCpu.fs" />
     <Compile Include="Emulator.fs" />
   </ItemGroup>
 

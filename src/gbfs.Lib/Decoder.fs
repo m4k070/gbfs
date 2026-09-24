@@ -93,14 +93,16 @@ module Decoder =
     else
       None
 
-  // LD A,(BC) - 0x0A
-  let (|LdABC|_|) (opcode: uint8) = if opcode = 0x0Auy then Some() else None
-  // LD A,(DE) - 0x1A
-  let (|LdADE|_|) (opcode: uint8) = if opcode = 0x1Auy then Some() else None
-  // LD (BC),A - 0x02
-  let (|LdBCA|_|) (opcode: uint8) = if opcode = 0x02uy then Some() else None
-  // LD (DE),A - 0x12
-  let (|LdDEA|_|) (opcode: uint8) = if opcode = 0x12uy then Some() else None
+  // LD A,(rr) - 0x0A(BC), 0x1A(DE)
+  let (|LdAIRr|_|) (opcode: uint8) =
+    if opcode = 0x0Auy then Some(Cpu.BC)
+    elif opcode = 0x1Auy then Some(Cpu.DE)
+    else None
+  // LD (rr),A - 0x02(BC), 0x12(DE)
+  let (|LdIRrA|_|) (opcode: uint8) =
+    if opcode = 0x02uy then Some(Cpu.BC)
+    elif opcode = 0x12uy then Some(Cpu.DE)
+    else None
   // LD A,(HL+) - 0x2A
   let (|LdAHLI|_|) (opcode: uint8) = if opcode = 0x2Auy then Some() else None
   // LD A,(HL-) - 0x3A
@@ -242,7 +244,13 @@ module Decoder =
     Joypad: Joypad.JoypadState
     Timer: Timer.TimerState
     Ime: bool  // Interrupt Master Enable
+    /// EI の効果は 1 命令遅れる: EI はこれを立て、次の命令の実行前に Ime へ反映する
+    /// (その命令の実行後に割込み判定が行われる。EI; DI なら割込みは起きない)
+    ImeScheduled: bool
     Halted: bool
+    /// HALT バグ (Pan Docs): IME=0 で要因がある状態の HALT は停止せず、PC は HALT 自身を指したまま。
+    /// 次の命令は PC+1 から読み、PC を基点に実行するので HALT の次のバイトが 2 回読まれる
+    HaltBug: bool
   }
 
   let createState () = {
@@ -253,7 +261,9 @@ module Decoder =
     Joypad = Joypad.create()
     Timer = Timer.create()
     Ime = false
+    ImeScheduled = false
     Halted = false
+    HaltBug = false
   }
 
   let loadRomToState (rom: byte array) (state: CpuState) =
@@ -415,7 +425,9 @@ module Decoder =
           stateWithPushedPC with
             Regs = { stateWithPushedPC.Regs with PC = vector }
             Ime = false
+            ImeScheduled = false
             Halted = false // Wake from HALT
+            HaltBug = false // EI 直後の HALT バグ: PC は HALT 自身を指しており、それが戻り番地になる
         }
 
         Some (finalState, 20) // Interrupt handling takes 20 cycles
@@ -426,17 +438,30 @@ module Decoder =
 
   /// Executes a single instruction and returns the new state with PPU updated
   let private executeInstruction (state: CpuState) : CpuState =
-    let opcode = readByte state.Regs.PC state
+    // 直前の命令が EI なら、この命令の実行前に IME を立てる (割込み判定は次の step の先頭)
+    let imeJustEnabled = state.ImeScheduled
+    let state = if state.ImeScheduled then { state with Ime = true; ImeScheduled = false } else state
+    // HALT バグ中は PC が HALT 自身を指すので、命令は PC+1 から読む (オペランドや PC の更新は PC 基点のまま)
+    let opcodeAddr = if state.HaltBug then state.Regs.PC + 1us else state.Regs.PC
+    let opcode = readByte opcodeAddr state
+    let state = { state with HaltBug = false }
 
     // 命令の実行とサイクル計算
     let (newState, cycles) =
       match opcode with
       | Nop -> (advancePc 1 state, 4)
-        | Halt -> ({ (advancePc 1 state) with Halted = true }, 4)
+        | Halt ->
+            // IME=0 (直前の EI で今立ったばかりも含む) で要因があると、停止せず PC も進めない (HALT バグ)
+            if (not state.Ime || imeJustEnabled) && getPendingInterrupts state <> 0uy then
+              ({ state with HaltBug = true }, 4)
+            else
+              ({ (advancePc 1 state) with Halted = true }, 4)
         | CBPrefixed ->
             let stateAfterPC = advancePc 1 state
             let (s, c) = stepCb stateAfterPC
-            (s, c + 4) // CB命令自体のサイクル(4)を追加
+            // stepCb はフェッチ後の実行サイクル(reg=8/(HL)=16/BIT(HL)=12)を返す
+            // CB プリフィックス自体のサイクルも含まれているため追加加算はしない
+            (s, c)
 
         // 8-bit Load
         | LdRR (dst_idx, src_idx) ->
@@ -476,27 +501,15 @@ module Decoder =
             let newState = setRegs (Cpu.LoadN16 reg imm s.Regs) s
             (newState, 12)
 
-        | LdABC ->
+        | LdAIRr reg ->
             let s = advancePc 1 state
-            let addr = Cpu.getRegisterValue (R16 BC) s.Regs
+            let addr = Cpu.getRegisterValue (R16 reg) s.Regs
             let value = readByte addr s
             let newState = setRegs (Cpu.LoadN8 A (uint16 value) s.Regs) s
             (newState, 8)
-        | LdADE ->
+        | LdIRrA reg ->
             let s = advancePc 1 state
-            let addr = Cpu.getRegisterValue (R16 DE) s.Regs
-            let value = readByte addr s
-            let newState = setRegs (Cpu.LoadN8 A (uint16 value) s.Regs) s
-            (newState, 8)
-        | LdBCA ->
-            let s = advancePc 1 state
-            let addr = Cpu.getRegisterValue (R16 BC) s.Regs
-            let value = Cpu.getRegisterValue (R8 A) s.Regs
-            let newState = writeByte addr (byte value) s
-            (newState, 8)
-        | LdDEA ->
-            let s = advancePc 1 state
-            let addr = Cpu.getRegisterValue (R16 DE) s.Regs
+            let addr = Cpu.getRegisterValue (R16 reg) s.Regs
             let value = Cpu.getRegisterValue (R8 A) s.Regs
             let newState = writeByte addr (byte value) s
             (newState, 8)
@@ -887,8 +900,8 @@ module Decoder =
             (newState, 4)
         
         // Interrupts
-        | Di -> ({ (advancePc 1 state) with Ime = false }, 4)
-        | Ei -> ({ (advancePc 1 state) with Ime = true }, 4)
+        | Di -> ({ (advancePc 1 state) with Ime = false; ImeScheduled = false }, 4)
+        | Ei -> ({ (advancePc 1 state) with ImeScheduled = true }, 4)
 
         // STOP (0x10): halt CPU & LCD until button press
         | Stop -> (advancePc 2 state, 4) // Skip next byte (0x00)

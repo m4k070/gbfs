@@ -300,6 +300,23 @@ module AddTests =
         Assert.Equal(0x01us, getRegisterValue (R8 A) result)
 
     [<Fact>]
+    let ``AddR sets Z flag when sum wraps to zero`` () =
+        // 0x3A + 0xC6 = 0x100 -> A = 0x00。Z/H/C がすべて立つ (wwc の sm83_full 仕様テストで発見)
+        let regs = { initRegister() with AF = 0x3A00us; BC = 0xC600us }
+        let result = AddR B regs
+        Assert.Equal(0x00us, getRegisterValue (R8 A) result)
+        Assert.True(isZ result)
+        Assert.True(isH result)
+        Assert.True(isC result)
+
+    [<Fact>]
+    let ``AddN8 sets Z flag when sum wraps to zero`` () =
+        let regs = { initRegister() with AF = 0x3A00us }
+        let result = AddN8 0xC6us regs
+        Assert.Equal(0x00us, getRegisterValue (R8 A) result)
+        Assert.True(isZ result)
+
+    [<Fact>]
     let ``AddN8 adds immediate to A`` () =
         let regs = { initRegister() with AF = 0x2000us }
         let result = AddN8 0x05us regs
