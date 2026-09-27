@@ -21,8 +21,13 @@ the contract is specified in `docs/web-api.md`.
 # Build all projects
 dotnet build
 
-# Run tests (224 tests, xUnit)
+# Run tests (244 tests, xUnit)
 dotnet test
+
+# Public test ROMs (blargg / mooneye) — ROMs live outside the repo in ../gb-test-roms (see its MANIFEST.md)
+nix develop -c dotnet build src/gbfs.Lib/gbfs.Lib.fsproj -c Release
+nix develop -c dotnet fsi tools/run_test_roms.fsx -- [--max-seconds n] [--tsv out.tsv] ../gb-test-roms/blargg/cpu_instrs/individual
+# Verdict logic (pure, emulator-independent, shared with wwc's RTL harness): tools/TestRomVerdict.fs
 
 # Run desktop UI (native deps come from the nix devShell)
 nix develop -c dotnet run --project src/gbfs.Desktop -- [path/to/rom.gb]
