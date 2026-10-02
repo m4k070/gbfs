@@ -54,6 +54,47 @@ module Emulator =
     let loadRom (rom: byte array) (state: EmulatorState) =
         { state with Cpu = (implOf state).LoadRom rom state.Cpu }
 
+    // ============================================================
+    // Cartridge RAM (バッテリーバックアップ)
+    // ============================================================
+
+    /// カートリッジの外部 RAM (バッテリー付きカートなら .sav の保存対象)
+    let getSaveRam (state: EmulatorState) : byte array = state.Cpu.Mem.ExtRam
+
+    /// この ROM がバッテリーバックアップを持つか (ROM ヘッダ 0x0147)
+    let hasBattery (state: EmulatorState) = state.Cpu.Mem.Mbc.HasBattery
+
+    /// マッパー名 (ROM / MBC1 / MBC2 / MBC3 / MBC5)
+    let getMapperName (state: EmulatorState) = mbcTypeName state.Cpu.Mem.Mbc.MbcType
+
+    /// 外部 RAM を差し替える (ROM の RAM サイズに合わせて切り詰め / 0 埋め)
+    let setSaveRam (data: byte array) (state: EmulatorState) =
+        let mem = state.Cpu.Mem
+        let ram = Array.zeroCreate mem.ExtRam.Length
+        Array.blit data 0 ram 0 (min data.Length ram.Length)
+        { state with Cpu = { state.Cpu with Mem = { mem with ExtRam = ram } } }
+
+    /// ROM パスに対応する .sav のパス (拡張子だけ差し替え)
+    let saveRamPath (romPath: string) =
+        System.IO.Path.ChangeExtension(romPath, ".sav")
+
+    /// ROM を読み込み、バッテリー付きカートなら隣接する .sav を復元する
+    let loadRomWithSave (romPath: string) (state: EmulatorState) =
+        let state = loadRom (System.IO.File.ReadAllBytes romPath) state
+        let path = saveRamPath romPath
+        if hasBattery state && System.IO.File.Exists path then
+            setSaveRam (System.IO.File.ReadAllBytes path) state
+        else state
+
+    /// バッテリー付きカートの外部 RAM を .sav に書き出す。書き出したら true。
+    let saveRam (romPath: string) (state: EmulatorState) =
+        if hasBattery state then
+            let path = saveRamPath romPath
+            let data = getSaveRam state
+            System.IO.File.WriteAllBytes(path, data)
+            true
+        else false
+
     let reset (state: EmulatorState) =
         let impl = implOf state
         { state with

@@ -10,6 +10,7 @@
 
   <ItemGroup>
     <Compile Include="CpuTests.fs" />
+    <Compile Include="MbcTests.fs" />
     <Compile Include="DecoderTests.fs" />
     <Compile Include="UnimplementedInstructionTests.fs" />
     <Compile Include="CBPrefixTests.fs" />
