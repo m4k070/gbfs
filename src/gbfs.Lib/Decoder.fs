@@ -740,28 +740,24 @@ module Decoder =
 
         | IncR regIdx ->
             let s = advancePc 1 state
-            let newState =
-                if regIdx = 6 then // INC (HL)
-                    let addr = Cpu.getRegisterValue (R16 HL) s.Regs
-                    let value = readByte addr s
-                    let (res, newRegs) = Cpu.IncMem (uint16 value) s.Regs
-                    writeByte addr res { s with Regs = newRegs }
-                else
-                    let reg = match r8map.[regIdx] with R8 r -> r | _ -> failwith "invalid reg"
-                    setRegs (Cpu.IncR reg s.Regs) s
-            (newState, 12)
+            if regIdx = 6 then // INC (HL) は 3 M サイクル (12 T)
+                let addr = Cpu.getRegisterValue (R16 HL) s.Regs
+                let value = readByte addr s
+                let (res, newRegs) = Cpu.IncMem (uint16 value) s.Regs
+                (writeByte addr res { s with Regs = newRegs }, 12)
+            else
+                let reg = match r8map.[regIdx] with R8 r -> r | _ -> failwith "invalid reg"
+                (setRegs (Cpu.IncR reg s.Regs) s, 4)
         | DecR regIdx ->
             let s = advancePc 1 state
-            let newState =
-                if regIdx = 6 then // DEC (HL)
-                    let addr = Cpu.getRegisterValue (R16 HL) s.Regs
-                    let value = readByte addr s
-                    let (res, newRegs) = Cpu.DecMem (uint16 value) s.Regs
-                    writeByte addr res { s with Regs = newRegs }
-                else
-                    let reg = match r8map.[regIdx] with R8 r -> r | _ -> failwith "invalid reg"
-                    setRegs (Cpu.DecR reg s.Regs) s
-            (newState, 12)
+            if regIdx = 6 then // DEC (HL) は 3 M サイクル (12 T)
+                let addr = Cpu.getRegisterValue (R16 HL) s.Regs
+                let value = readByte addr s
+                let (res, newRegs) = Cpu.DecMem (uint16 value) s.Regs
+                (writeByte addr res { s with Regs = newRegs }, 12)
+            else
+                let reg = match r8map.[regIdx] with R8 r -> r | _ -> failwith "invalid reg"
+                (setRegs (Cpu.DecR reg s.Regs) s, 4)
         
         // 16-bit Inc/Dec
         | Inc16 reg ->
