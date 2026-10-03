@@ -181,13 +181,48 @@ module Memory =
       | _ -> 0x2000           // default 8KB
     else 0x2000
 
+  /// 電源投入直後 (ブート ROM 完了時点 = PC 0x0100) の I/O レジスタ初期値。
+  /// 出典: Pan Docs "Power-Up Sequence" の DMG / MGB 列。同表の根拠は
+  /// mooneye-test-suite acceptance/boot_hwio-dmgABCmgb (実機で検証済み)。
+  /// 未使用レジスタと CGB 専用レジスタは非 CGB モードでは 0xFF を読む。
+  let private postBootIo : byte array =
+    let io = Array.create 0x80 0xFFuy
+    io.[0x00] <- 0xCFuy   // P1   (ボタン選択なし・押下なし)
+    io.[0x01] <- 0x00uy   // SB
+    io.[0x02] <- 0x7Euy   // SC
+    io.[0x04] <- 0xABuy   // DIV  (Timer.postBootCounter の上位バイトと一致させること)
+    io.[0x05] <- 0x00uy   // TIMA
+    io.[0x06] <- 0x00uy   // TMA
+    io.[0x07] <- 0xF8uy   // TAC  (タイマ停止, 4096Hz 選択)
+    io.[0x0F] <- 0xE1uy   // IF   (VBlank フラグ + 未使用ビットは 1)
+    Array.blit [| 0x80uy; 0xBFuy; 0xF3uy; 0xFFuy; 0x3Fuy; 0xFFuy; 0x3Fuy; 0x00uy
+                  0xFFuy; 0x3Fuy; 0x7Fuy; 0xFFuy; 0x9Fuy; 0xFFuy; 0x3Fuy; 0xFFuy
+                  0xFFuy; 0x00uy; 0x00uy; 0x3Fuy; 0x77uy; 0xF3uy; 0xF1uy |] 0 io 0x10 23  // NR10-NR52
+    // NR14/NR24/NR34/NR44 の bit7 はトリガ要求フラグとして扱う (書き込み時のみ 1)。
+    // 読み出しは常に 1 を返す (read 側でマスク) ので、ここでは 0 (要求なし) にしておく。
+    // 初期値を 0xBF にすると起動直後に APU が全チャンネルを誤トリガーする。
+    Array.fill io 0x30 16 0x00uy  // 波形 RAM (ブート直後の値は未検証のため 0x00)
+    io.[0x40] <- 0x91uy   // LCDC (LCD on / BG on / OBJ on)
+    io.[0x41] <- 0x85uy   // STAT (VBlank モード + LYC=LY)
+    io.[0x42] <- 0x00uy   // SCY
+    io.[0x43] <- 0x00uy   // SCX
+    io.[0x44] <- 0x00uy   // LY
+    io.[0x45] <- 0x00uy   // LYC
+    io.[0x46] <- 0xFFuy   // DMA
+    io.[0x47] <- 0xFCuy   // BGP
+    io.[0x48] <- 0xFFuy   // OBP0
+    io.[0x49] <- 0xFFuy   // OBP1
+    io.[0x4A] <- 0x00uy   // WY
+    io.[0x4B] <- 0x00uy   // WX
+    io
+
   let create () = {
     Rom = Array.zeroCreate 0x8000      // 32KB ROM (default)
     Vram = Array.zeroCreate 0x2000     // 8KB VRAM
     ExtRam = Array.zeroCreate 0x2000   // 8KB External RAM
     Wram = Array.zeroCreate 0x2000     // 8KB Work RAM
     Oam = Array.zeroCreate 0xA0        // 160 bytes OAM
-    Io = Array.zeroCreate 0x80         // 128 bytes I/O
+    Io = Array.copy postBootIo         // 128 bytes I/O (電源投入直後の値)
     Hram = Array.zeroCreate 0x7F       // 127 bytes High RAM
     Ie = 0uy
     Mbc =
@@ -307,7 +342,12 @@ module Memory =
       0xFFuy
     | _ when a < 0xFF80 ->
       // I/O
-      mem.Io.[a - 0xFF00]
+      // NR14/NR24/NR34/NR44 の bit7 (トリガ) は書き込み専用で、読み出しは常に 1。
+      // Io 配列はトリガ要求 (pending) を保持するため、CPU からの読み出し時のみ 1 を立てる。
+      let value = mem.Io.[a - 0xFF00]
+      match a with
+      | 0xFF14 | 0xFF19 | 0xFF1E | 0xFF23 -> value ||| 0x80uy
+      | _ -> value
     | _ when a < 0xFFFF ->
       // HRAM
       mem.Hram.[a - 0xFF80]
