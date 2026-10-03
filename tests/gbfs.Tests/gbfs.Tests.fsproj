@@ -10,9 +10,12 @@
 
   <ItemGroup>
     <Compile Include="CpuTests.fs" />
+    <Compile Include="MbcTests.fs" />
     <Compile Include="DecoderTests.fs" />
     <Compile Include="UnimplementedInstructionTests.fs" />
     <Compile Include="CBPrefixTests.fs" />
+    <Compile Include="../../tools/TestRomVerdict.fs" Link="TestRomVerdict.fs" />
+    <Compile Include="TestRomVerdictTests.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 

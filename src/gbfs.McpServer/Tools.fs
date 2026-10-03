@@ -11,6 +11,8 @@ open gbfs.Lib
 /// Mutable emulator state held in-process
 module EmulatorHolder =
     let mutable state = Emulator.create()
+    /// 最後にロードした ROM のパス (.sav の保存先を決めるのに使う)
+    let mutable romPath: string option = None
 
 module FrameRelay =
     let private client = new HttpClient()
@@ -33,20 +35,43 @@ module FrameRelay =
 type EmulatorTools() =
 
     [<McpServerTool>]
-    [<Description("Load a ROM file into the emulator. Resets any previous state.")>]
+    [<Description("Load a ROM file into the emulator. Resets any previous state. Restores .sav (battery-backed cartridge RAM) if present next to the ROM.")>]
     static member load_rom([<Description("Absolute path to the .gb ROM file")>] path: string) : string =
         try
             let rom = File.ReadAllBytes(path)
-            let fileName = Path.GetFileName(path)
-            EmulatorHolder.state <- Emulator.loadRom rom (Emulator.create())
-            sprintf "ROM loaded: %s (%d bytes)" fileName rom.Length
+            EmulatorHolder.state <- Emulator.loadRomWithSave path (Emulator.create ())
+            EmulatorHolder.romPath <- Some path
+            let savPath = Emulator.saveRamPath path
+            let savNote =
+                if Emulator.hasBattery EmulatorHolder.state && File.Exists savPath then
+                    sprintf " | restored %s" (Path.GetFileName savPath)
+                else ""
+            sprintf "ROM loaded: %s (%d bytes) | mapper %s%s%s"
+                (Path.GetFileName path) rom.Length
+                (Emulator.getMapperName EmulatorHolder.state)
+                (if Emulator.hasBattery EmulatorHolder.state then " +battery" else "")
+                savNote
         with ex ->
             sprintf "Error loading ROM: %s" ex.Message
+
+    [<McpServerTool>]
+    [<Description("Write battery-backed cartridge RAM to <rom>.sav. No-op (returns a message) for ROMs without a battery.")>]
+    static member save_ram() : string =
+        match EmulatorHolder.romPath with
+        | None -> "No ROM loaded"
+        | Some path ->
+            if not (Emulator.hasBattery EmulatorHolder.state) then
+                sprintf "%s has no battery-backed RAM; nothing to save" (Path.GetFileName path)
+            else
+                let savPath = Emulator.saveRamPath path
+                File.WriteAllBytes(savPath, Emulator.getSaveRam EmulatorHolder.state)
+                sprintf "Saved %d bytes to %s" (Emulator.getSaveRam EmulatorHolder.state).Length (Path.GetFileName savPath)
 
     [<McpServerTool>]
     [<Description("Reset the emulator to initial state (clears ROM)")>]
     static member reset() : string =
         EmulatorHolder.state <- Emulator.reset EmulatorHolder.state
+        EmulatorHolder.romPath <- None
         "Emulator reset"
 
     [<McpServerTool>]

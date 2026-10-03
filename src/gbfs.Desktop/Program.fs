@@ -103,7 +103,8 @@ type Model =
     { State: Emulator.EmulatorState
       RomPath: string option
       Running: bool
-      Error: string option }
+      Error: string option
+      SaveNote: string option }
 
 type Msg =
     | Start
@@ -126,19 +127,40 @@ let private mapKey (key: string) : string option =
 
 let tryLoadRom (path: string) (model: Model) : Model =
     try
-        let rom = File.ReadAllBytes(path)
+        let state = Emulator.loadRomWithSave path (Emulator.create ())
+        let savPath = Emulator.saveRamPath path
+        let note =
+            if Emulator.hasBattery state && File.Exists savPath then
+                Some $"loaded {Path.GetFileName savPath}"
+            else None
         { model with
-            State = Emulator.loadRom rom (Emulator.create ())
+            State = state
             RomPath = Some path
             Error = None
-            Running = false }
+            Running = false
+            SaveNote = note }
     with ex ->
         { model with Error = Some $"ROM load failed: %s{ex.Message}" }
 
+/// バッテリー付きカートなら .sav を書き出す (書き出したらメッセージ)
+let saveRamIfNeeded (model: Model) : string option =
+    match model.RomPath with
+    | Some p when Emulator.hasBattery model.State ->
+        try
+            Emulator.saveRam p model.State |> ignore
+            Some (Path.GetFileName(Emulator.saveRamPath p))
+        with ex -> Some $"save failed: %s{ex.Message}"
+    | _ -> None
+
 let update (audio: AudioOut.T) (msg: Msg) (model: Model) : Model =
     match msg with
-    | Start when model.RomPath.IsSome -> { model with Running = true }
-    | Stop -> { model with Running = false }
+    | Start when model.RomPath.IsSome -> { model with Running = true; SaveNote = None }
+    | Stop ->
+        // 停止時にバッテリー付きカートの外部 RAM を .sav へ書き出す
+        let stopped = { model with Running = false }
+        match saveRamIfNeeded stopped with
+        | Some note -> { stopped with SaveNote = Some $"saved {note}" }
+        | None -> stopped
     | Tick when model.Running ->
         let s = Emulator.runFrame model.State
         let samples = Emulator.getAudioBuffer s
@@ -161,7 +183,8 @@ type MainWindow() as this =
         { State = Emulator.create ()
           RomPath = None
           Running = false
-          Error = None }
+          Error = None
+          SaveNote = None }
 
     // 160x144 BGRA フレームバッファ (framebuffer の byte 0..3 → palette)
     let bitmap =
@@ -205,12 +228,17 @@ type MainWindow() as this =
             match model.RomPath with
             | Some p ->
                 let st = model.State
+                let battery = if Emulator.hasBattery st then "+BATT" else ""
                 (if model.Running then "Running" else "Stopped")
                 + $" | Frame %d{st.FrameCount} | PC=0x%04X{st.Cpu.Regs.PC}"
+                + $" | %s{Emulator.getMapperName st}{battery}"
                 + $" | %s{Path.GetFileName p}"
             | None -> "No ROM (pass a .gb path as argv[0], or put test.gb in cwd)"
         errorText.Text <-
             [ model.Error |> Option.defaultValue ""
+              match model.SaveNote with
+              | Some note -> note
+              | None -> ""
               match audio with
               | AudioOut.Unavailable r -> $"audio unavailable: %s{r}"
               | _ -> "" ]
@@ -283,6 +311,10 @@ type MainWindow() as this =
             dispatch (if model.Running then Stop else Start)
 
     override _.OnClosed(_) =
+        // 終了時にもバッテリー付きカートの外部 RAM を保存する
+        match saveRamIfNeeded model with
+        | Some note -> model <- { model with SaveNote = Some note }
+        | None -> ()
         AudioOut.dispose audio
         timer.Stop()
 

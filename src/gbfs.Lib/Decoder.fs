@@ -437,7 +437,8 @@ module Decoder =
   // ====================
 
   /// Executes a single instruction and returns the new state with PPU updated
-  let private executeInstruction (state: CpuState) : CpuState =
+  /// 1 命令を実行し、(新しい状態, 消費サイクル数 (T サイクル)) を返す
+  let private executeInstruction (state: CpuState) : CpuState * int =
     // 直前の命令が EI なら、この命令の実行前に IME を立てる (割込み判定は次の step の先頭)
     let imeJustEnabled = state.ImeScheduled
     let state = if state.ImeScheduled then { state with Ime = true; ImeScheduled = false } else state
@@ -942,14 +943,16 @@ module Decoder =
     let (apu, mem2) = Apu.step cycles newState.Apu mem1
     let (joypad, mem3) = Joypad.sync newState.Joypad mem2
     let (timer, mem4) = Timer.step cycles newState.Timer mem3
-    { newState with Ppu = ppu; Apu = apu; Joypad = joypad; Timer = timer; Mem = mem4 }
+    ({ newState with Ppu = ppu; Apu = apu; Joypad = joypad; Timer = timer; Mem = mem4 }, cycles)
 
   // ====================
   // Single Step with Interrupt Handling
   // ====================
 
-  /// Executes a single step: handles interrupts, HALT state, and instruction execution
-  let step (state: CpuState) : CpuState =
+  /// Executes a single step: handles interrupts, HALT state, and instruction execution.
+  /// 戻り値は (新しい状態, この step で周辺回路を進めたサイクル数 (T サイクル))。
+  /// テスト ROM ランナー等、経過サイクルを数えたい呼び出し元向け
+  let stepWithCycles (state: CpuState) : CpuState * int =
     // First, check for pending interrupts
     let pending = getPendingInterrupts state
 
@@ -967,7 +970,7 @@ module Decoder =
             let (apu, mem2) = Apu.step cycles interruptedState.Apu mem1
             let (joypad, mem3) = Joypad.sync interruptedState.Joypad mem2
             let (timer, mem4) = Timer.step cycles interruptedState.Timer mem3
-            { interruptedState with Ppu = ppu; Apu = apu; Joypad = joypad; Timer = timer; Mem = mem4 }
+            ({ interruptedState with Ppu = ppu; Apu = apu; Joypad = joypad; Timer = timer; Mem = mem4 }, cycles)
         | None ->
             // IME is false, but we still wake from HALT and continue execution
             executeInstruction wokenState
@@ -977,7 +980,7 @@ module Decoder =
         let (apu, mem2) = Apu.step 4 state.Apu mem1
         let (joypad, mem3) = Joypad.sync state.Joypad mem2
         let (timer, mem4) = Timer.step 4 state.Timer mem3
-        { state with Ppu = ppu; Apu = apu; Joypad = joypad; Timer = timer; Mem = mem4 }
+        ({ state with Ppu = ppu; Apu = apu; Joypad = joypad; Timer = timer; Mem = mem4 }, 4)
     else
       // Not halted - check for interrupts first
       match handleInterrupt state with
@@ -987,10 +990,14 @@ module Decoder =
           let (apu, mem2) = Apu.step cycles interruptedState.Apu mem1
           let (joypad, mem3) = Joypad.sync interruptedState.Joypad mem2
           let (timer, mem4) = Timer.step cycles interruptedState.Timer mem3
-          { interruptedState with Ppu = ppu; Apu = apu; Joypad = joypad; Timer = timer; Mem = mem4 }
+          ({ interruptedState with Ppu = ppu; Apu = apu; Joypad = joypad; Timer = timer; Mem = mem4 }, cycles)
       | None ->
           // No interrupt, execute normal instruction
           executeInstruction state
+
+  /// Executes a single step (see `stepWithCycles`), discarding the cycle count
+  let step (state: CpuState) : CpuState =
+    fst (stepWithCycles state)
 
   // Run until halted or max steps
   let run maxSteps (state: CpuState) =
