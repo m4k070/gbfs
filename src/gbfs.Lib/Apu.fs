@@ -460,19 +460,19 @@ module Apu =
         let nr11 = Memory.read NR11 mem
         let nr12 = Memory.read NR12 mem
         let nr13 = Memory.read NR13 mem
-        let nr14 = Memory.read NR14 mem
+        let nr14 = mem.Io.[int (NR14 - 0xFF00us)]
         let nr21 = Memory.read NR21 mem
         let nr22 = Memory.read NR22 mem
         let nr23 = Memory.read NR23 mem
-        let nr24 = Memory.read NR24 mem
+        let nr24 = mem.Io.[int (NR24 - 0xFF00us)]
         let nr30 = Memory.read NR30 mem
         let nr31 = Memory.read NR31 mem
         let nr32 = Memory.read NR32 mem
         let nr33 = Memory.read NR33 mem
-        let nr34 = Memory.read NR34 mem
+        let nr34 = mem.Io.[int (NR34 - 0xFF00us)]
         let nr42 = Memory.read NR42 mem
         let nr43 = Memory.read NR43 mem
-        let nr44 = Memory.read NR44 mem
+        let nr44 = mem.Io.[int (NR44 - 0xFF00us)]
         (nr10, nr11, nr12, nr13, nr14,
          nr21, nr22, nr23, nr24,
          nr30, nr31, nr32, nr33, nr34,

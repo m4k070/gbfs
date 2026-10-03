@@ -41,8 +41,21 @@ module Timer =
     // Initialization
     // ============================================================
 
+    /// 電源投入直後の内部カウンタ値。
+    /// DIV = 0xAB は Pan Docs "Power-Up Sequence" の DMG/MGB の値 (上位バイトが 0xAB)。
+    /// 低位バイトは mooneye acceptance/boot_div-dmgABCmgb が要求する 6 回の読み出し
+    /// (期待値 AC,AD,AD,AE,AF,B1) から逆算した。同 ROM は PC 0x0100 で
+    /// nop / jp 0x0150 を実行してから 6 nops + 読み出しを繰り返すので、
+    /// 各 ldh a,(DIV) の開始時点までの累積 T サイクルは 44/300/552/808/1064/1324。
+    /// すべての期待値と両立するカウンタは 0xABD4..0xABD7 の 4 値で、
+    /// テストの「読み出しは DIV インクリメント直後」という意図に一致する
+    /// 0xABD5 (= 0xAC01 - 44) を採る。
+    /// Memory.postBootIo の DIV (0xFF04) も同じ値 (0xAB) に揃えること
+    /// (Timer.step は Io とカウンタの不一致を「DIV 書き込み」と解釈するため)。
+    let postBootCounter = 0xABD5us
+
     let create () = {
-        InternalCounter = 0us
+        InternalCounter = postBootCounter
         PreviousTiBit = false
         OverflowPending = false
     }
