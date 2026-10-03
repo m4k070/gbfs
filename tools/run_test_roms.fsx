@@ -62,6 +62,8 @@ type Options = {
     Protocol: Protocol option
     TsvPath: string option
     Quiet: bool
+    /// マシン種別 (既定 DMG)。CGB 用テスト ROM (misc/ の -C / cgb 系) は --machine cgb で回す
+    Machine: Memory.MachineMode
 }
 
 let rec parseArgs (opts: Options) (args: string list) : Result<Options, string> =
@@ -75,6 +77,9 @@ let rec parseArgs (opts: Options) (args: string list) : Result<Options, string> 
     | "--protocol" :: "blargg" :: rest -> parseArgs { opts with Protocol = Some BlarggSerial } rest
     | "--protocol" :: "mooneye" :: rest -> parseArgs { opts with Protocol = Some MooneyeFibonacci } rest
     | "--protocol" :: v :: _ -> Error (sprintf "--protocol must be blargg or mooneye, got %s" v)
+    | "--machine" :: "dmg" :: rest -> parseArgs { opts with Machine = Memory.Dmg } rest
+    | "--machine" :: "cgb" :: rest -> parseArgs { opts with Machine = Memory.Cgb } rest
+    | "--machine" :: v :: _ -> Error (sprintf "--machine must be dmg or cgb, got %s" v)
     | "--tsv" :: v :: rest -> parseArgs { opts with TsvPath = Some v } rest
     | "--quiet" :: rest -> parseArgs { opts with Quiet = true } rest
     | a :: _ when a.StartsWith("--") -> Error (sprintf "unknown option: %s" a)
@@ -200,7 +205,7 @@ let pollSerial (mem: Memory.MemoryBus) : Memory.MemoryBus * byte option =
 // 1 本の実行
 // ============================================================
 
-let runRom (protocol: Protocol) (maxSeconds: float) (path: string) : RomResult =
+let runRom (protocol: Protocol) (machine: Memory.MachineMode) (maxSeconds: float) (path: string) : RomResult =
     let rom = File.ReadAllBytes path
     let maxCycles = int64 (maxSeconds * float CpuHz)
     let limitDescription = sprintf "%.0f emulated seconds (%d cycles)" maxSeconds maxCycles
@@ -209,7 +214,7 @@ let runRom (protocol: Protocol) (maxSeconds: float) (path: string) : RomResult =
     let serial = Text.StringBuilder()
     let sw = Diagnostics.Stopwatch.StartNew()
 
-    let mutable cpu = Decoder.loadRomToState rom (Decoder.createState ())
+    let mutable cpu = Decoder.loadRomToState rom (Decoder.createStateFor machine ())
     let mutable instructions = 0L
     let mutable cycles = 0L
     let mutable steps = 0
@@ -345,14 +350,14 @@ let writeTsv (path: string) (results: RomResult list) : unit =
 // ============================================================
 
 let main (argv: string list) : int =
-    let emptyOptions = { Paths = []; MaxSeconds = None; Protocol = None; TsvPath = None; Quiet = false }
+    let emptyOptions = { Paths = []; MaxSeconds = None; Protocol = None; TsvPath = None; Quiet = false; Machine = Memory.Dmg }
     let parsed = parseArgs emptyOptions argv |> Result.bind (fun o -> collectRoms o.Paths |> Result.map (fun roms -> (o, roms)))
     match parsed with
     | Error e ->
         eprintfn "error: %s" e
         2
     | Ok (_, []) ->
-        eprintfn "usage: dotnet fsi tools/run_test_roms.fsx -- [--max-seconds n] [--protocol blargg|mooneye] [--tsv out.tsv] [--quiet] <rom.gb|dir>..."
+        eprintfn "usage: dotnet fsi tools/run_test_roms.fsx -- [--max-seconds n] [--protocol blargg|mooneye] [--machine dmg|cgb] [--tsv out.tsv] [--quiet] <rom.gb|dir>..."
         2
     | Ok (opts, roms) ->
         let runOne path =
@@ -361,7 +366,7 @@ let main (argv: string list) : int =
                 match protocol with
                 | BlarggSerial -> DefaultMaxSecondsBlargg
                 | MooneyeFibonacci -> DefaultMaxSecondsMooneye
-            let result = runRom protocol (opts.MaxSeconds |> Option.defaultValue defaultSeconds) path
+            let result = runRom protocol opts.Machine (opts.MaxSeconds |> Option.defaultValue defaultSeconds) path
             printResult opts.Quiet result
             result
         let results = roms |> List.map runOne

@@ -531,10 +531,23 @@ module Cpu =
   // ====================
 
   let initRegister () =
-    // ゲームボーイ起動時の初期値
+    // ゲームボーイ起動時の初期値 (DMG)
     { AF = 0x01B0us  // A=0x01, F=0xB0 (Z=1, N=0, H=1, C=1)
       BC = 0x0013us
       DE = 0x00D8us
       HL = 0x014Dus
       PC = 0x0100us  // エントリポイント
+      SP = 0xFFFEus }
+
+  /// CGB マシンの起動時の初期値 (Pan Docs "Power-Up Sequence" の CGB (DMG 互換) 列。
+  /// 根拠は mooneye misc/boot_regs-cgb: A=0x11, F=0x80, B=0x00, C=0x00, D=0x00, E=0x08,
+  /// H=0x00, L=0x7C, SP=0xFFFE)。
+  /// B は実際にはヘッダのライセンスコードに依存するため、ROM ロード時に上書きする
+  /// (Memory.cgbBootB)。
+  let initRegisterCgb () =
+    { AF = 0x1180us  // A=0x11 (CGB ハードの識別値), F=0x80 (Z=1)
+      BC = 0x0000us
+      DE = 0x0008us
+      HL = 0x007Cus
+      PC = 0x0100us
       SP = 0xFFFEus }

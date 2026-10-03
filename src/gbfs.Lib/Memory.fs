@@ -127,7 +127,19 @@ module Memory =
     Rtc: RtcState
   }
 
+  /// マシン種別。CGB でもカートが CGB 非対応 (ヘッダ 0x0143 bit7 = 0) なら
+  /// DMG 互換モードで動き、CGB 専用レジスタは 0xFF を読む (Pan Docs: CGB Registers)。
+  type MachineMode =
+    | Dmg
+    | Cgb
+
+  let machineName = function
+    | Dmg -> "DMG"
+    | Cgb -> "CGB"
+
   type MemoryBus = {
+    /// マシン種別 (電源投入直後の初期値に影響する)
+    Machine: MachineMode
     Rom: byte array        // Full ROM data
     Vram: byte array       // 8KB Video RAM
     ExtRam: byte array     // External RAM (MBC2 は 512 nibble を 1 byte/nibble で保持)
@@ -182,10 +194,13 @@ module Memory =
     else 0x2000
 
   /// 電源投入直後 (ブート ROM 完了時点 = PC 0x0100) の I/O レジスタ初期値。
-  /// 出典: Pan Docs "Power-Up Sequence" の DMG / MGB 列。同表の根拠は
-  /// mooneye-test-suite acceptance/boot_hwio-dmgABCmgb (実機で検証済み)。
-  /// 未使用レジスタと CGB 専用レジスタは非 CGB モードでは 0xFF を読む。
-  let private postBootIo : byte array =
+  /// DMG: Pan Docs "Power-Up Sequence" の DMG/MGB 列。同表の根拠は
+  ///      mooneye-test-suite acceptance/boot_hwio-dmgABCmgb (実機で検証済み)。
+  /// CGB: mooneye-test-suite misc/boot_hwio-C (実機の CGB で検証済み)。
+  ///      同 ROM のヘッダは 0x0143 = 0x00 なので CGB の DMG 互換モードの値であり、
+  ///      CGB 専用レジスタは 0xFF を読む。
+  /// 未使用レジスタはどちらも 0xFF。
+  let private postBootIoFor (machine: MachineMode) : byte array =
     let io = Array.create 0x80 0xFFuy
     io.[0x00] <- 0xCFuy   // P1   (ボタン選択なし・押下なし)
     io.[0x01] <- 0x00uy   // SB
@@ -214,15 +229,46 @@ module Memory =
     io.[0x49] <- 0xFFuy   // OBP1
     io.[0x4A] <- 0x00uy   // WY
     io.[0x4B] <- 0x00uy   // WX
+    if machine = Cgb then
+      // CGB で DMG と値が異なるレジスタ (mooneye misc/boot_hwio-C の比較対象のみ)
+      io.[0x00] <- 0xFFuy   // P1: CGB のブート ROM は 0x30 を書く (どちらのボタン群も非選択)
+      io.[0x04] <- 0x26uy   // DIV: Timer.postBootCounter (CGB) の上位バイト
+      io.[0x48] <- 0x00uy   // OBP0: CGB では未初期化値が 0x00
+      io.[0x49] <- 0x00uy   // OBP1
+      io.[0x68] <- 0xC8uy   // BCPS (互換モードの残響値)
+      io.[0x6A] <- 0xD0uy   // OCPS
+      io.[0x72] <- 0x00uy   // 未定義レジスタ
+      io.[0x73] <- 0x00uy
+      io.[0x75] <- 0x8Fuy
+      io.[0x76] <- 0x00uy
+      io.[0x77] <- 0x00uy
     io
 
-  let create () = {
+  /// CGB マシンでの B レジスタ初期値 (Pan Docs "Power-Up Sequence" 脚注 3)。
+  /// 旧ライセンスコードが 0x01、または 0x33 かつ新ライセンスコードが "01" (= 任天堂) なら
+  /// タイトル 16 バイト (0x0134-0x0143) の総和、それ以外は 0x00。
+  /// (mooneye misc/boot_regs-cgb はライセンス "ZZ" なので 0x00 を期待する)
+  let cgbBootB (rom: byte array) : byte =
+    if rom.Length < 0x0150 then 0x00uy
+    else
+      let oldLicensee = rom.[0x014B]
+      let isNintendo =
+        oldLicensee = 0x01uy
+        || (oldLicensee = 0x33uy && rom.[0x0144] = 0x30uy && rom.[0x0145] = 0x31uy)
+      if not isNintendo then 0x00uy
+      else
+        let mutable sum = 0
+        for i in 0x0134 .. 0x0143 do sum <- sum + int rom.[i]
+        byte (sum &&& 0xFF)
+
+  let createWith (machine: MachineMode) () = {
+    Machine = machine
     Rom = Array.zeroCreate 0x8000      // 32KB ROM (default)
     Vram = Array.zeroCreate 0x2000     // 8KB VRAM
     ExtRam = Array.zeroCreate 0x2000   // 8KB External RAM
     Wram = Array.zeroCreate 0x2000     // 8KB Work RAM
     Oam = Array.zeroCreate 0xA0        // 160 bytes OAM
-    Io = Array.copy postBootIo         // 128 bytes I/O (電源投入直後の値)
+    Io = Array.copy (postBootIoFor machine)  // 128 bytes I/O (電源投入直後の値)
     Hram = Array.zeroCreate 0x7F       // 127 bytes High RAM
     Ie = 0uy
     Mbc =
@@ -234,6 +280,9 @@ module Memory =
         IsMulticart = false
         HasBattery = false
         Rtc = rtcCreate () } }
+
+  /// DMG マシン (既定) のメモリを作る
+  let create () = createWith Dmg ()
 
   let loadRom (rom: byte array) (mem: MemoryBus) =
     let mbcType = detectMbcType rom

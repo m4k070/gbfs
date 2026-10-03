@@ -42,23 +42,33 @@ module Timer =
     // ============================================================
 
     /// 電源投入直後の内部カウンタ値。
-    /// DIV = 0xAB は Pan Docs "Power-Up Sequence" の DMG/MGB の値 (上位バイトが 0xAB)。
-    /// 低位バイトは mooneye acceptance/boot_div-dmgABCmgb が要求する 6 回の読み出し
-    /// (期待値 AC,AD,AD,AE,AF,B1) から逆算した。同 ROM は PC 0x0100 で
-    /// nop / jp 0x0150 を実行してから 6 nops + 読み出しを繰り返すので、
-    /// 各 ldh a,(DIV) の開始時点までの累積 T サイクルは 44/300/552/808/1064/1324。
-    /// すべての期待値と両立するカウンタは 0xABD4..0xABD7 の 4 値で、
-    /// テストの「読み出しは DIV インクリメント直後」という意図に一致する
-    /// 0xABD5 (= 0xAC01 - 44) を採る。
-    /// Memory.postBootIo の DIV (0xFF04) も同じ値 (0xAB) に揃えること
+    /// DIV = 0xAB (DMG) / 0x26 (CGB) は Pan Docs "Power-Up Sequence" の各列の値 (上位バイトが一致)。
+    /// 低位バイトは mooneye の位相テストが要求する 6 回の読み出し
+    /// (DMG acceptance/boot_div-dmgABCmgb: AC,AD,AD,AE,AF,B1 /
+    ///  CGB misc/boot_div-cgbABCDE: 27,28,28,29,2A,2C) から逆算した。
+    /// どちらも PC 0x0100 で nop / jp 0x0150 を実行してから nop 数だけを変えて読み出すので、
+    /// 読み出し開始時点の累積 T サイクルは DMG: 44/300/552/808/1064/1324、
+    /// CGB: 128/384/636/892/1148/1408。
+    /// 6 つの期待値すべてと両立するのは 4 値の窓 (DMG: 0xABD4..0xABD7 / CGB: 0x2680..0x2683) で、
+    /// テストの「読み出しは DIV 更新直後」という意図に一致する値を採る
+    /// (DMG: 0xAC01 - 44 = 0xABD5 / CGB: 0x2701 - 128 = 0x2681)。
+    /// 注意: CGB のブート ROM の長さは実際にはヘッダ内容 (と互換パレット選択) に依存するため
+    /// (Pan Docs 脚注 5)、この固定値は mooneye のテスト ROM に合わせた近似。
+    /// Memory.postBootIoFor の DIV (0xFF04) も同じ値に揃えること
     /// (Timer.step は Io とカウンタの不一致を「DIV 書き込み」と解釈するため)。
-    let postBootCounter = 0xABD5us
+    let postBootCounterFor (machine: Memory.MachineMode) =
+        match machine with
+        | Memory.Dmg -> 0xABD5us
+        | Memory.Cgb -> 0x2681us
 
-    let create () = {
-        InternalCounter = postBootCounter
+    let createWith (machine: Memory.MachineMode) () = {
+        InternalCounter = postBootCounterFor machine
         PreviousTiBit = false
         OverflowPending = false
     }
+
+    /// DMG マシン (既定) のタイマを作る
+    let create () = createWith Memory.Dmg ()
 
     // ============================================================
     // Helpers

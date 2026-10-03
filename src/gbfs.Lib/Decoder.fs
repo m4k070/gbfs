@@ -253,21 +253,36 @@ module Decoder =
     HaltBug: bool
   }
 
-  let createState () = {
-    Regs = Cpu.initRegister()
-    Mem = Memory.create()
+  /// マシン種別 (DMG / CGB) を指定して起動状態を作る
+  let createStateFor (machine: Memory.MachineMode) () = {
+    Regs =
+      match machine with
+      | Memory.Dmg -> Cpu.initRegister()
+      | Memory.Cgb -> Cpu.initRegisterCgb()
+    Mem = Memory.createWith machine ()
     Ppu = Ppu.create()
     Apu = Apu.create()
     Joypad = Joypad.create()
-    Timer = Timer.create()
+    Timer = Timer.createWith machine ()
     Ime = false
     ImeScheduled = false
     Halted = false
     HaltBug = false
   }
 
+  /// DMG マシン (既定) の起動状態
+  let createState () = createStateFor Memory.Dmg ()
+
   let loadRomToState (rom: byte array) (state: CpuState) =
-    { state with Mem = Memory.loadRom rom state.Mem }
+    let mem = Memory.loadRom rom state.Mem
+    // CGB マシンでは B がヘッダのライセンスコード依存になる (Pan Docs "Power-Up Sequence" 脚注 3)
+    let regs =
+      match mem.Machine with
+      | Memory.Cgb ->
+        let b = uint16 (Memory.cgbBootB rom)
+        { state.Regs with BC = (state.Regs.BC &&& 0x00FFus) ||| (b <<< 8) }
+      | Memory.Dmg -> state.Regs
+    { state with Regs = regs; Mem = mem }
 
   // ====================
   // Helper functions
