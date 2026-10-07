@@ -116,8 +116,8 @@ module Ppu =
 
             let tileRowAddr = tilePatternAddr + uint16 (yTile * 2)
 
-            let byte1 = Memory.read tileRowAddr mem
-            let byte2 = Memory.read (tileRowAddr + 1us) mem
+            let byte1 = Memory.readVramBank0 tileRowAddr mem
+            let byte2 = Memory.readVramBank0 (tileRowAddr + 1us) mem
 
             // Determine which palette to use
             let objPalette = if sprite.Palette = 0uy then obp0 else obp1
@@ -208,7 +208,7 @@ module Ppu =
                 let tileMapIndex = tileMapY * 32 + tileMapX
                 
                 let tileIndexAddr = windowTileMapBase + uint16 tileMapIndex
-                let tileIndex = int (Memory.read tileIndexAddr mem)
+                let tileIndex = int (Memory.readVramBank0 tileIndexAddr mem)
 
                 let tilePatternAddr =
                     if signedTileIndex then
@@ -220,8 +220,8 @@ module Ppu =
                 let pixelYInTile = int (windowLine % 8uy)
                 let tileRowAddr = tilePatternAddr + uint16 (pixelYInTile * 2)
                 
-                let byte1 = Memory.read tileRowAddr mem
-                let byte2 = Memory.read (tileRowAddr + 1us) mem
+                let byte1 = Memory.readVramBank0 tileRowAddr mem
+                let byte2 = Memory.readVramBank0 (tileRowAddr + 1us) mem
 
                 let pixelXInTile = 7 - (windowPixelX % 8)
                 let colorBit1 = (byte1 >>> pixelXInTile) &&& 1uy
@@ -251,7 +251,7 @@ module Ppu =
                 let tileMapIndex = tileMapY * 32 + tileMapX
                 
                 let tileIndexAddr = bgTileMapBase + uint16 tileMapIndex
-                let tileIndex = int (Memory.read tileIndexAddr mem)
+                let tileIndex = int (Memory.readVramBank0 tileIndexAddr mem)
 
                 let tilePatternAddr =
                     if signedTileIndex then
@@ -263,8 +263,8 @@ module Ppu =
                 let pixelYInTile = int (y % 8uy)
                 let tileRowAddr = tilePatternAddr + uint16 (pixelYInTile * 2)
                 
-                let byte1 = Memory.read tileRowAddr mem
-                let byte2 = Memory.read (tileRowAddr + 1us) mem
+                let byte1 = Memory.readVramBank0 tileRowAddr mem
+                let byte2 = Memory.readVramBank0 (tileRowAddr + 1us) mem
 
                 let pixelXInTile = 7 - (int (mapX % 8us))
                 let colorBit1 = (byte1 >>> pixelXInTile) &&& 1uy
@@ -319,12 +319,13 @@ module Ppu =
         let mutable newMem = mem
         let mutable remainingCycles = cycles
 
-        // Handle DMA transfer if initiated
-        let dmaValue = Memory.read DMA newMem
-        if dmaValue <> 0uy then
+        // Handle DMA transfer if initiated (0xFF46 への書き込みがあったときだけ)
+        if newMem.DmaRequest then
+            let dmaValue = Memory.read DMA newMem
             newMem <- dmaTransfer dmaValue newMem
-            // Reset DMA register after transfer
-            newMem <- Memory.write DMA 0uy newMem
+            // 転送後は 0xFF46 が 0x00 になる (Memory.write 経由だと再び要求が立つため直接書く)
+            newMem.Io.[int (DMA - 0xFF00us)] <- 0uy
+            newMem <- { newMem with DmaRequest = false }
             // DMA takes 160 cycles. Subtract from current cycles.
             remainingCycles <- remainingCycles - 160 // Or more accurately, 640 T-cycles / 4 T-cycles per machine cycle = 160 machine cycles.
 

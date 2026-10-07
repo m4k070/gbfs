@@ -140,10 +140,18 @@ module Memory =
   type MemoryBus = {
     /// マシン種別 (電源投入直後の初期値に影響する)
     Machine: MachineMode
+    /// CGB モードが解禁されているか (マシンが CGB かつ ヘッダ 0x0143 bit7 = 1)。ROM ロード時に確定する。
+    /// false のとき CGB 専用レジスタは 0xFF を読み、書き込みを無視する
+    /// (Pan Docs: CGB Registers "you must first unlock CGB features by changing byte 0143")
+    CgbMode: bool
     Rom: byte array        // Full ROM data
-    Vram: byte array       // 8KB Video RAM
+    Vram: byte array       // Video RAM (CGB は 2 バンク = 16KB)
+    VramBank: int          // 現在の VRAM バンク (0/1。CGB モードのみ有効)
     ExtRam: byte array     // External RAM (MBC2 は 512 nibble を 1 byte/nibble で保持)
-    Wram: byte array       // 8KB Work RAM
+    Wram: byte array       // Work RAM (CGB は 8 バンク = 32KB)
+    /// OAM DMA (0xFF46) の転送要求。0xFF46 への書き込みで立ち、PPU が転送して消費する。
+    /// レジスタ値だけで判定すると電源投入直後の 0xFF46 = 0xFF で誤って転送してしまう
+    DmaRequest: bool
     Oam: byte array        // 160 bytes OAM
     Io: byte array         // 128 bytes I/O
     Hram: byte array       // 127 bytes High RAM
@@ -263,10 +271,13 @@ module Memory =
 
   let createWith (machine: MachineMode) () = {
     Machine = machine
+    CgbMode = false                    // ROM ロード時に確定する
     Rom = Array.zeroCreate 0x8000      // 32KB ROM (default)
-    Vram = Array.zeroCreate 0x2000     // 8KB VRAM
+    Vram = Array.zeroCreate 0x4000     // 16KB VRAM (CGB の 2 バンク分)
+    VramBank = 0
     ExtRam = Array.zeroCreate 0x2000   // 8KB External RAM
-    Wram = Array.zeroCreate 0x2000     // 8KB Work RAM
+    Wram = Array.zeroCreate 0x8000     // 32KB Work RAM (CGB の 8 バンク分)
+    DmaRequest = false
     Oam = Array.zeroCreate 0xA0        // 160 bytes OAM
     Io = Array.copy (postBootIoFor machine)  // 128 bytes I/O (電源投入直後の値)
     Hram = Array.zeroCreate 0x7F       // 127 bytes High RAM
@@ -287,7 +298,23 @@ module Memory =
   let loadRom (rom: byte array) (mem: MemoryBus) =
     let mbcType = detectMbcType rom
     let ramSize = getRamSize mbcType rom
+    // CGB モードの解禁はヘッダ 0x0143 bit7 (0x80 = CGB 対応, 0xC0 = CGB 専用)
+    let cgbMode = mem.Machine = Cgb && rom.Length > 0x0143 && (rom.[0x0143] &&& 0x80uy) <> 0uy
+    let io =
+      if not cgbMode then mem.Io
+      else
+        // CGB モードの起動値。ブート ROM が書き込む値なので検証 ROM が無い (未検証)。
+        // 非 CGB モード側の値は mooneye misc/boot_hwio-C で検証済み。
+        let io = Array.copy mem.Io
+        io.[0x4D] <- 0x00uy   // KEY1: 通常速度 (bit7=0) / 未アーム (bit0=0)
+        io.[0x6C] <- 0x00uy   // OPRI: CGB 方式のオブジェクト優先度
+        io.[0x70] <- 0x00uy   // SVBK: 0 を書いた状態 (実効バンクは 1、読み出しは 0xF8)
+        io.[0x74] <- 0x00uy   // 未定義レジスタ (CGB モードでは 0x00 から読み書きできる)
+        io
     { mem with
+        CgbMode = cgbMode
+        VramBank = 0
+        Io = io
         Rom = Array.copy rom
         ExtRam = Array.zeroCreate ramSize
         Mbc =
@@ -346,6 +373,31 @@ module Memory =
           let bank = if mem.Mbc.MbcType = Mbc1 then mbc1RamBank mem else mem.Mbc.RamBank
           mem.ExtRam.[(bank * 0x2000 + offset) &&& (mem.ExtRam.Length - 1)]
 
+  /// VRAM の読み書き。CGB は 2 バンク (0 = タイル/マップ, 1 = 属性)。
+  /// 非 CGB モードでは VBK の書き込みが無視されるため bank は常に 0 になる。
+  let private vramIndex (bank: int) (offset: int) = (bank &&& 1) * 0x2000 + (offset &&& 0x1FFF)
+
+  /// D000-DFFF に割り当てる WRAM バンク。非 CGB モードではバンク 1 固定。
+  /// SVBK (0xFF70) の値 0 はバンク 1 として扱う (Pan Docs: CGB Registers / SVBK)
+  let private wramBank (mem: MemoryBus) =
+    if not mem.CgbMode then 1
+    else
+      let b = int mem.Io.[0x70] &&& 0x07
+      if b = 0 then 1 else b
+
+  let readVram (bank: int) (offset: int) (mem: MemoryBus) : byte =
+    mem.Vram.[vramIndex bank offset]
+
+  let private writeVram (bank: int) (offset: int) (value: byte) (mem: MemoryBus) : MemoryBus =
+    mem.Vram.[vramIndex bank offset] <- value
+    mem
+
+  /// PPU 用: 常に VRAM バンク 0 を読む。
+  /// CGB のタイルデータとタイルマップはバンク 0、属性はバンク 1 にあり、
+  /// PPU のアクセスは CPU の VBK とは独立している。
+  let readVramBank0 (addr: uint16) (mem: MemoryBus) : byte =
+    readVram 0 (int addr - 0x8000) mem
+
   let read (addr: uint16) (mem: MemoryBus) : byte =
     let a = int addr
     match a with
@@ -368,8 +420,8 @@ module Memory =
       | Mbc2 | Mbc3 -> readRomBank (if mem.Mbc.RomBank = 0 then 1 else mem.Mbc.RomBank) offset mem
       | Mbc5 -> readRomBank mem.Mbc.RomBank offset mem
     | _ when a < 0xA000 ->
-      // VRAM
-      mem.Vram.[a - 0x8000]
+      // VRAM (CGB は VBK で 2 バンクを切り替える)
+      readVram mem.VramBank (a - 0x8000) mem
     | _ when a < 0xC000 ->
       // External RAM / RTC (with MBC bank switching)
       let offset = a - 0xA000
@@ -378,11 +430,14 @@ module Memory =
       else
         readExtRam offset mem
     | _ when a < 0xE000 ->
-      // Work RAM
-      mem.Wram.[a - 0xC000]
+      // Work RAM (C000-CFFF はバンク 0 固定、D000-DFFF は WramBank)
+      if a < 0xD000 then mem.Wram.[a - 0xC000]
+      else mem.Wram.[wramBank mem * 0x1000 + (a - 0xD000)]
     | _ when a < 0xFE00 ->
-      // Echo RAM (mirror of C000-DDFF)
-      mem.Wram.[a - 0xE000]
+      // Echo RAM (C000-DDFF のミラー)
+      let ea = a - 0x2000
+      if ea < 0xD000 then mem.Wram.[ea - 0xC000]
+      else mem.Wram.[wramBank mem * 0x1000 + (ea - 0xD000)]
     | _ when a < 0xFEA0 ->
       // OAM
       mem.Oam.[a - 0xFE00]
@@ -396,6 +451,14 @@ module Memory =
       let value = mem.Io.[a - 0xFF00]
       match a with
       | 0xFF14 | 0xFF19 | 0xFF1E | 0xFF23 -> value ||| 0x80uy
+      // CGB 専用レジスタ。非 CGB モードでは 0xFF を読む (Pan Docs: CGB Registers)
+      | 0xFF4C -> if mem.CgbMode then 0xFEuy else 0xFFuy                          // KEY0 (bit0 = DMG 互換モード = 0)
+      | 0xFF4D -> if mem.CgbMode then 0x7Euy ||| (value &&& 0x81uy) else 0xFFuy   // KEY1 (bit7 = 倍速, bit0 = アーム)
+      | 0xFF4F -> if mem.CgbMode then 0xFEuy ||| byte mem.VramBank else 0xFFuy    // VBK
+      | 0xFF6C -> if mem.CgbMode then 0xFEuy ||| (value &&& 0x01uy) else 0xFFuy   // OPRI
+      | 0xFF70 -> if mem.CgbMode then 0xF8uy ||| (value &&& 0x07uy) else 0xFFuy    // SVBK
+      | 0xFF74 -> if mem.CgbMode then value else 0xFFuy                           // 未定義 (CGB モードでは読み書き可)
+      | 0xFF75 -> (value &&& 0x70uy) ||| 0x8Fuy                                   // 未定義 (bit4-6 のみ読み書き可)
       | _ -> value
     | _ when a < 0xFFFF ->
       // HRAM
@@ -463,9 +526,8 @@ module Memory =
         { mem with Mbc = { mem.Mbc with Rtc = { latched with LatchPrev = value } } }
       | _ -> mem
     | _ when a < 0xA000 ->
-      // VRAM
-      mem.Vram.[a - 0x8000] <- value
-      mem
+      // VRAM (CGB は VBK で 2 バンクを切り替える)
+      writeVram mem.VramBank (a - 0x8000) value mem
     | _ when a < 0xC000 ->
       // External RAM / RTC
       let offset = a - 0xA000
@@ -475,12 +537,15 @@ module Memory =
       else
         writeExtRam offset value mem
     | _ when a < 0xE000 ->
-      // Work RAM
-      mem.Wram.[a - 0xC000] <- value
+      // Work RAM (C000-CFFF はバンク 0 固定、D000-DFFF は WramBank)
+      if a < 0xD000 then mem.Wram.[a - 0xC000] <- value
+      else mem.Wram.[wramBank mem * 0x1000 + (a - 0xD000)] <- value
       mem
     | _ when a < 0xFE00 ->
-      // Echo RAM
-      mem.Wram.[a - 0xE000] <- value
+      // Echo RAM (C000-DDFF のミラー)
+      let ea = a - 0x2000
+      if ea < 0xD000 then mem.Wram.[ea - 0xC000] <- value
+      else mem.Wram.[wramBank mem * 0x1000 + (ea - 0xD000)] <- value
       mem
     | _ when a < 0xFEA0 ->
       // OAM
@@ -491,8 +556,32 @@ module Memory =
       mem
     | _ when a < 0xFF80 ->
       // I/O
-      mem.Io.[a - 0xFF00] <- value
-      mem
+      match a with
+      // CGB 専用レジスタは非 CGB モードでは書き込みを無視する (Pan Docs: CGB Registers)
+      | 0xFF4C -> mem   // KEY0: ブート ROM 完了後にロックされるため書き込み不可
+      | 0xFF4D ->       // KEY1: bit0 (速度切替のアーム) のみ書き込み可。bit7 は読み出し専用
+        if mem.CgbMode then mem.Io.[0x4D] <- (mem.Io.[0x4D] &&& 0x80uy) ||| (value &&& 0x01uy)
+        mem
+      | 0xFF4F ->       // VBK
+        if mem.CgbMode then { mem with VramBank = int value &&& 0x01 } else mem
+      | 0xFF6C ->       // OPRI
+        if mem.CgbMode then mem.Io.[0x6C] <- value &&& 0x01uy
+        mem
+      | 0xFF70 ->       // SVBK: 値そのものを保持する (0 は実効バンク 1、読み出しは 0xF8 ベース)
+        if mem.CgbMode then mem.Io.[0x70] <- value &&& 0x07uy
+        mem
+      | 0xFF46 ->       // OAM DMA の要求 (転送は PPU が行う)
+        mem.Io.[0x46] <- value
+        { mem with DmaRequest = true }
+      | 0xFF74 ->       // 未定義 (CGB モードでは読み書き可)
+        if mem.CgbMode then mem.Io.[0x74] <- value
+        mem
+      | 0xFF75 ->       // 未定義 (bit4-6 のみ読み書き可)
+        mem.Io.[0x75] <- (mem.Io.[0x75] &&& 0x8Fuy) ||| (value &&& 0x70uy)
+        mem
+      | _ ->
+        mem.Io.[a - 0xFF00] <- value
+        mem
     | _ when a < 0xFFFF ->
       // HRAM
       mem.Hram.[a - 0xFF80] <- value

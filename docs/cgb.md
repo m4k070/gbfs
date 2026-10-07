@@ -17,6 +17,67 @@ gbfs はマシン種別として DMG と CGB を持つ (`Memory.MachineMode`)。
 mooneye の CGB 用テスト ROM (`misc/` の `-C` / `cgb` 系) はヘッダ `0x0143 = 0x00` なので、
 **CGB ハード上の DMG 互換モード**として走る。したがって `--machine cgb` で回す。
 
+== CGB モードの解禁 (CgbMode)
+
+`MemoryBus.CgbMode` は **マシンが CGB かつ ヘッダ `0x0143` bit7 = 1** のときだけ true になる
+(ROM ロード時に確定)。Pan Docs: CGB Registers の
+"you must first unlock CGB features by changing byte 0143" に対応する。
+
+* true のとき: CGB 専用レジスタが機能し、VRAM/WRAM のバンク切り替えが有効になる
+* false のとき: CGB 専用レジスタは **`0xFF` を読み、書き込みは無視**される。
+  CGB モードの起動値 (KEY1 = 0x7E, OPRI = 0xFE, SVBK の読み出し = 0xF8, FF74 = 0x00) も
+  `Memory.loadRom` で設定する。これらはブート ROM が書き込む値なので検証 ROM が無い (**未検証**)
+
+=== メモリバンク
+
+[cols="1,1,1,3"]
+|===
+| レジスタ | 名称 | 読み出し | 動作
+
+| 0xFF4F | VBK | `0xFE \| bank` | VRAM バンク (0/1) を切り替える。非 CGB モードでは無視
+| 0xFF70 | SVBK | `0xF8 \| value` | D000-DFFF の WRAM バンク。0 はバンク 1 として扱う。非 CGB モードでは無視
+|===
+
+* VRAM は 2 バンク 16KB。バンク 0 = タイル/タイルマップ、バンク 1 = タイルマップの属性 (CGB)。
+  **PPU は `Memory.readVramBank0` で常にバンク 0 を読む** (CPU の VBK とは独立)。
+  CGB の属性 (パレット/反転/優先度) を読む処理は未実装
+* WRAM は 8 バンク 32KB。C000-CFFF はバンク 0 固定、D000-DFFF は SVBK で切り替え。
+  Echo RAM (E000-FDFF) も同じバンクを見る
+* 非 CGB モードの SVBK は値 0x00 のまま扱われ、実効バンクは 1 固定
+
+== KEY0 / KEY1 / OPRI / 未定義レジスタ
+
+出典: Pan Docs "CGB Registers"。
+
+[cols="1,1,4"]
+|===
+| アドレス | 名称 | 挙動
+
+| 0xFF4C | KEY0 | 非 CGB モード: `0xFF`。CGB モード: `0xFE` (bit0 = DMG 互換モード = 0)。
+  ブート ROM 完了後にロックされるため**書き込みは無視**する
+| 0xFF4D | KEY1 | bit7 = 現在の速度 (読み出し専用)、bit0 = 速度切替のアーム (読み書き)。
+  CGB モードの読み出しは `0x7E \| bit7 \| bit0`、非 CGB モードは `0xFF`
+| 0xFF6C | OPRI | bit0 = オブジェクト優先度 (0 = CGB 方式, 1 = DMG 方式)。非 CGB モードは `0xFF`
+| 0xFF74 | 未定義 | CGB モードでは読み書き可 (初期 0x00)、非 CGB モードは `0xFF` 固定
+| 0xFF75 | 未定義 | bit4-6 のみ読み書き可 (`0x8F \| (value & 0x70)`)。両モード共通
+|===
+
+== STOP と倍速 (Double Speed)
+
+Pan Docs "CGB Registers / KEY1" の手順: KEY1 の bit0 を立ててから STOP を実行すると
+速度が切り替わり、bit0 は自動でクリアされる。切替後は **2050 M サイクル = 8200 T サイクル**
+CPU が停止する。停止中は DIV が進まない。
+
+* 倍速で 2 倍になる: CPU、タイマ/分周器、シリアル、OAM DMA
+* 等速のまま: LCD、APU、HDMA
+* 実装: `Decoder.stepPeripherals` が PPU と APU に `cycles / 2` を渡し、
+  タイマには `cycles` をそのまま渡す (gbfs の命令サイクルはすべて 4 の倍数なので割り切れる)
+* 停止は `CpuState.Stopped` に残りサイクルを保持し、停止中は命令を実行せずタイマも進めない
+* **倍速判定は `CgbMode` でゲートすること**。非 CGB モードでは `0xFF4D` が `0xFF` を読むため、
+  Io の生値だけを見ると bit7 が立っており倍速と誤判定する (実装中に実際に踏んだ回帰)
+* 未検証: 停止中の割込みの扱い、シリアル/OAM DMA の倍速化 (Pan Docs に TODO とある箇所)
+
+
 == 起動時の CPU レジスタ
 
 出典: mooneye `misc/boot_regs-cgb` (実機の CGB で検証済み)。
@@ -99,14 +160,29 @@ CGB 版は最初の nops が 27 なので、読み出し開始時点の累積 T 
 DMG 版 (`acceptance/boot_hwio-dmgABCmgb`) と同じくブート ROM なしでは再現できない。
 それ以外の全レジスタは一致している。
 
+=== unit test
+
+* `MachineModeTests` がマシン種別・CGB モード解禁・バンク・KEY1/STOP・倍速のクロック配分を直接検証する
+* 倍速の周辺クロック配分と STOP の停止動作は**検証 ROM が無い**ため unit test のみ
+  (Pan Docs の記述に基づく実装であり、実機での確認は未実施)
+* DMG の回帰は公開 ROM 161 本で確認する (`docs/power-on.md` と同じ手順)
+
+== 実装中に見つけた既存のバグ
+
+* **電源投入直後の OAM DMA 誤爆**: `Ppu.step` が `0xFF46` のレジスタ値で DMA を判定していたため、
+  起動値 `0xFF` を「DMA 要求」と解釈して 160 バイトを OAM へ転送し、PPU のサイクルを
+  160 減らしていた (PPU のモード/LY タイミングが起動直後からずれる)。
+  `MemoryBus.DmaRequest` を追加し、`0xFF46` への**書き込み**でのみ転送するようにした
+* **倍速判定の誤り**: 非 CGB モードでは `0xFF4D` が `0xFF` を読むため、Io の生値の bit7 を
+  見ると DMG でも倍速と判定され、PPU/APU が半分の速度で動いていた。
+  `CgbMode` でゲートして修正 (unit test `DMG では 0xFF4D が 0xFF でも倍速と誤判定しない` で固定)
+
 == 未実装 (今後の課題)
 
-* **KEY0 (0xFF4C) / KEY1 (0xFF4D) と STOP による倍速切り替え**。
-  倍速時は CPU・タイマ・シリアル・OAM DMA が 2 倍、LCD と APU は等速 (Pan Docs)。
-  STOP 後の CPU 停止は 2050 M サイクル。手元の mooneye/blargg にこれを検証する ROM が無いため、
-  実装する場合は unit test のみで検証し「未検証」と明示する。
-* **CGB パレット** (BCPS/BCPD, OCPS/OCPD) とカラー描画。現状の PPU は DMG の 4 階調のみ。
-* **VRAM バンク (VBK) / WRAM バンク (SVBK)**。現状は書き込みを無視する (レジスタの初期値のみ正しい)。
-* **HDMA (0xFF51-0xFF55)**、**赤外線 (RP)**、**OPRI**。
+* **CGB パレット** (BCPS/BCPD = 0xFF68/0xFF69, OCPS/OCPD = 0xFF6A/0xFF6B) とカラー描画。
+  現状の PPU は DMG の 4 階調のみで、VRAM バンク 1 の属性 (パレット番号/反転/優先度) も読まない。
+  **実 CGB カートを動かすにはここが必要** (次のスライス)
+* **HDMA (0xFF51-0xFF55)**、**赤外線 (RP = 0xFF56)**
+* 倍速時のシリアル / OAM DMA の速度 (現状は CPU とタイマのみ 2 倍)
 * `Emulator` (Desktop / MCP) は常に DMG で起動する。CGB カートを動かすには
-  マシン種別を選ぶ経路 (UI / MCP ツール) が必要。
+  マシン種別を選ぶ経路 (UI / MCP ツール) が必要
