@@ -51,6 +51,15 @@ module Emulator =
           FrameCount = 0
           TotalCycles = 0L }
 
+    /// マシン種別 (DMG / CGB) を指定してエミュレータを作る。
+    /// 実 CGB カートを動かすときは Memory.Cgb を渡す
+    /// (カート側の CGB 対応はヘッダ 0x0143 bit7 で判定され、CGB モードが解禁される)
+    let createWithMachine (machine: Memory.MachineMode) =
+        { Cpu = Decoder.createStateFor machine ()
+          CpuKind = Native
+          FrameCount = 0
+          TotalCycles = 0L }
+
     let loadRom (rom: byte array) (state: EmulatorState) =
         { state with Cpu = (implOf state).LoadRom rom state.Cpu }
 
@@ -96,9 +105,9 @@ module Emulator =
         else false
 
     let reset (state: EmulatorState) =
-        let impl = implOf state
+        // マシン種別は維持する (CGB のセッションが DMG に戻らないように)
         { state with
-            Cpu = impl.CreateState()
+            Cpu = Decoder.createStateFor state.Cpu.Mem.Machine ()
             FrameCount = 0
             TotalCycles = 0L }
 

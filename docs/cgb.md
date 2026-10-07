@@ -177,6 +177,22 @@ DMG 版 (`acceptance/boot_hwio-dmgABCmgb`) と同じくブート ROM なしで�
   見ると DMG でも倍速と判定され、PPU/APU が半分の速度で動いていた。
   `CgbMode` でゲートして修正 (unit test `DMG では 0xFF4D が 0xFF でも倍速と誤判定しない` で固定)
 
+== 実 ROM を走らせる (ヘッドレス検証)
+
+実カートのダンプを動かして画面を目視で確認する経路:
+
+[source,sh]
+----
+nix develop -c dotnet fsi tools/dump_frames.fsx -- <rom.gb> [--machine cgb] [--frames 120] [--out frame.png]
+----
+
+* `Emulator.createWithMachine Memory.Cgb` で CGB マシンとして起動する
+  (カート側の `0x0143` bit7 で CGB モードが解禁される)。`Emulator.reset` もマシン種別を維持する
+* バッテリー付きカートは ROM の隣の `.sav` を読む (書き戻しはしない)
+* 出力は 8bit グレースケール (DMG の 4 階調を 255/170/85/0 に対応)。
+  CGB のカラー描画を実装したら RGB 出力に切り替える
+* 実 ROM は著作物なので**リポジトリには入れない** (ローカルの検証素材として扱う)
+
 == 未実装 (今後の課題)
 
 * **CGB パレット** (BCPS/BCPD = 0xFF68/0xFF69, OCPS/OCPD = 0xFF6A/0xFF6B) とカラー描画。
