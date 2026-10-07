@@ -246,6 +246,34 @@ let ``C000-CFFF はバンク 0 固定で Echo RAM も同じバンクを見る`` 
     Assert.Equal(0xDDuy, Memory.read 0xC100us mem)
 
 // ============================================================
+// Emulator のマシン種別
+// ============================================================
+
+[<Fact>]
+let ``Emulator.createWithMachine は CGB マシンで起動し CGB モードが解禁される`` () =
+    let st = Emulator.createWithMachine Memory.Cgb
+    Assert.Equal(Memory.Cgb, st.Cpu.Mem.Machine)
+    let st = Emulator.loadRom (makeCgbRom ()) st
+    Assert.True(st.Cpu.Mem.CgbMode)
+    Assert.Equal(0x11us, st.Cpu.Regs.AF >>> 8)
+
+[<Fact>]
+let ``Emulator.createWithMachine Dmg では CGB モードにならない`` () =
+    let st = Emulator.createWithMachine Memory.Dmg
+    let st = Emulator.loadRom (makeCgbRom ()) st
+    Assert.False(st.Cpu.Mem.CgbMode)
+
+[<Fact>]
+let ``Emulator.reset はマシン種別を維持する`` () =
+    let st =
+        Emulator.createWithMachine Memory.Cgb
+        |> Emulator.loadRom (makeCgbRom ())
+        |> Emulator.reset
+    Assert.Equal(Memory.Cgb, st.Cpu.Mem.Machine)
+    Assert.Equal(0, st.FrameCount)
+    Assert.Equal(0x11us, st.Cpu.Regs.AF >>> 8)
+
+// ============================================================
 // STOP と倍速 (Pan Docs: CGB Registers / KEY1)
 // ============================================================
 
