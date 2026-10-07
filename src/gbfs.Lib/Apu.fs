@@ -487,8 +487,13 @@ module Apu =
         let enabled = (nr52 &&& 0x80uy) <> 0uy
 
         if not enabled then
-            // APU disabled: clear all state except length counters
-            ({ apuState with Enabled = false }, mem)
+            // APU が OFF (NR52 bit7 = 0) のときは全チャンネルを停止する (DAC も含めてリセット)
+            ({ apuState with
+                Enabled = false
+                Channel1 = { apuState.Channel1 with Enabled = false; DacEnabled = false }
+                Channel2 = { apuState.Channel2 with Enabled = false; DacEnabled = false }
+                Channel3 = { apuState.Channel3 with Enabled = false; DacEnabled = false }
+                Channel4 = { apuState.Channel4 with Enabled = false; DacEnabled = false } }, mem)
         else
 
         // Read registers for trigger detection
@@ -527,6 +532,22 @@ module Apu =
             let ch = { state.Channel4 with LengthCounter = if state.Channel4.LengthCounter = 0 then 64 - lenLoad else state.Channel4.LengthCounter }
             state <- { state with Channel4 = triggerNoiseChannel ch nr42 nr43 nr44 }
             newMem <- Memory.write NR44 (nr44 &&& 0x7Fuy) newMem
+
+        // DAC が OFF になったチャンネルは停止する。
+        // Pan Docs (Audio Details): チャンネルが停止する経路は「DAC OFF」「レングス満了」「CH1 のスイープ溢れ」の 3 つ。
+        // NRx2 & 0xF8 = 0 で DAC OFF (CH3 は NR30 bit7 で直接制御)。NR52 のビットは DAC ではなくチャンネルの ON/OFF を表す
+        if (nr12 &&& 0xF8uy) = 0uy then
+            state <- { state with Channel1 = { state.Channel1 with Enabled = false; DacEnabled = false } }
+        if (nr22 &&& 0xF8uy) = 0uy then
+            state <- { state with Channel2 = { state.Channel2 with Enabled = false; DacEnabled = false } }
+        if (nr30 &&& 0x80uy) = 0uy then
+            state <- { state with Channel3 = { state.Channel3 with Enabled = false; DacEnabled = false } }
+        if (nr42 &&& 0xF8uy) = 0uy then
+            state <- { state with Channel4 = { state.Channel4 with Enabled = false; DacEnabled = false } }
+
+        // レングス有効化 (NRx4 bit6) はトリガ時のみ反映する (トリガ経路で設定済み)。
+        // Pan Docs Audio Details 脚注 5 の「0→1 遷移時に 1 回デクリメント」は未実装。
+        // 再生中に bit6 を 1→0 に書いてもハードではレングスは止まらないため、毎ステップ反映してはいけない
 
         // Process cycles one at a time
         for _ in 1 .. cycles do

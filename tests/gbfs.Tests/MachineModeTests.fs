@@ -405,3 +405,45 @@ let ``非 CGB モードではパレット RAM は変化しない`` () =
     let mem = Memory.write 0xFF69us 0x1Fuy mem
     Assert.Equal(0x0000us, Memory.bgPaletteColor 0 0 mem)
     Assert.Equal(0x1Fuy, Memory.read 0xFF69us mem)   // レジスタ値として保持される
+
+// ============================================================
+// APU のチャンネル停止
+// Pan Docs (Audio Details): チャンネルが停止する経路は
+// 「DAC OFF」「レングス満了」「CH1 のスイープ溢れ」の 3 つだけ。
+// NR52 のビットは DAC ではなくチャンネルの ON/OFF を表す
+// ============================================================
+
+/// CH1 を DAC ON (NR12 = 0xF0) でトリガした状態を作る
+let private triggeredCh1 () =
+    let mem =
+        Memory.createWith Memory.Cgb ()
+        |> Memory.write 0xFF12us 0xF0uy   // DAC ON, 音量 15
+        |> Memory.write 0xFF14us 0x80uy   // トリガ
+    Apu.step 4 (Apu.create ()) mem
+
+[<Fact>]
+let ``CH1 はトリガで有効になり NR52 のビットが立つ`` () =
+    let (apu, mem) = triggeredCh1 ()
+    Assert.True(apu.Channel1.Enabled)
+    Assert.True(apu.Channel1.DacEnabled)
+    Assert.Equal(0x01, int (Memory.read 0xFF26us mem) &&& 0x0F)
+
+[<Fact>]
+let ``DAC を切るとチャンネルが停止し NR52 のビットが落ちる`` () =
+    let (apu, mem) = triggeredCh1 ()
+    // NR12 = 0x00 → DAC OFF (NRx2 & 0xF8 = 0)
+    let mem2 = Memory.write 0xFF12us 0x00uy mem
+    let (apu2, mem2) = Apu.step 4 apu mem2
+    Assert.False(apu2.Channel1.Enabled)
+    Assert.False(apu2.Channel1.DacEnabled)
+    Assert.Equal(0x00, int (Memory.read 0xFF26us mem2) &&& 0x0F)
+
+[<Fact>]
+let ``APU を OFF (NR52 bit7 = 0) にすると全チャンネルが停止する`` () =
+    let (apu, mem) = triggeredCh1 ()
+    Assert.True(apu.Channel1.Enabled)
+    let mem2 = Memory.write 0xFF26us 0x00uy mem
+    let (apu2, _) = Apu.step 4 apu mem2
+    Assert.False(apu2.Enabled)
+    Assert.False(apu2.Channel1.Enabled)
+    Assert.False(apu2.Channel1.DacEnabled)
