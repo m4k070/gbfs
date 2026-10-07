@@ -251,6 +251,9 @@ module Decoder =
     /// HALT バグ (Pan Docs): IME=0 で要因がある状態の HALT は停止せず、PC は HALT 自身を指したまま。
     /// 次の命令は PC+1 から読み、PC を基点に実行するので HALT の次のバイトが 2 回読まれる
     HaltBug: bool
+    /// STOP で速度を切り替えた後の CPU 停止の残り T サイクル
+    /// (Pan Docs: 2050 M サイクル = 8200 T サイクル)。0 のとき実行中
+    Stopped: int
   }
 
   /// マシン種別 (DMG / CGB) を指定して起動状態を作る
@@ -268,6 +271,7 @@ module Decoder =
     ImeScheduled = false
     Halted = false
     HaltBug = false
+    Stopped = 0
   }
 
   /// DMG マシン (既定) の起動状態
@@ -450,6 +454,21 @@ module Decoder =
   // ====================
   // Instruction Execution
   // ====================
+
+  /// 周辺回路を cycles (CPU の T サイクル) 分進める。
+  /// CGB の倍速モードでは CPU・タイマ・シリアル・OAM DMA が 2 倍、LCD と APU は等速で動くため
+  /// (Pan Docs: CGB Registers / KEY1)、PPU と APU には半分のサイクルを渡す。
+  /// gbfs の命令サイクルはすべて 4 の倍数なので 2 で割り切れる。
+  let private stepPeripherals (cycles: int) (st: CpuState) : CpuState =
+    // 倍速判定は CgbMode でゲートする。非 CGB モードでは 0xFF4D が 0xFF を読むため、
+    // Io の生値だけを見ると bit7 が立っており誤判定する
+    let doubleSpeed = st.Mem.CgbMode && (st.Mem.Io.[0x4D] &&& 0x80uy) <> 0uy
+    let slow = if doubleSpeed then cycles / 2 else cycles
+    let (ppu, mem1) = Ppu.step slow st.Ppu st.Mem
+    let (apu, mem2) = Apu.step slow st.Apu mem1
+    let (joypad, mem3) = Joypad.sync st.Joypad mem2
+    let (timer, mem4) = Timer.step cycles st.Timer mem3
+    { st with Ppu = ppu; Apu = apu; Joypad = joypad; Timer = timer; Mem = mem4 }
 
   /// Executes a single instruction and returns the new state with PPU updated
   /// 1 命令を実行し、(新しい状態, 消費サイクル数 (T サイクル)) を返す
@@ -915,8 +934,19 @@ module Decoder =
         | Di -> ({ (advancePc 1 state) with Ime = false; ImeScheduled = false }, 4)
         | Ei -> ({ (advancePc 1 state) with ImeScheduled = true }, 4)
 
-        // STOP (0x10): halt CPU & LCD until button press
-        | Stop -> (advancePc 2 state, 4) // Skip next byte (0x00)
+        // STOP (0x10): CGB モードで KEY1 bit0 がアームされていれば倍速を切り替える
+        // (Pan Docs: CGB Registers / KEY1)。切替後は 8200 T サイクル CPU が停止する。
+        | Stop ->
+          let s = advancePc 2 state // Skip next byte (0x00)
+          let armed = (s.Mem.Io.[0x4D] &&& 0x01uy) <> 0uy
+          if s.Mem.CgbMode && armed then
+            // 速度を反転し、アームを解除する (bit7 は読み出し専用、bit0 は自動クリア)
+            s.Mem.Io.[0x4D] <- (s.Mem.Io.[0x4D] &&& 0x80uy) ^^^ 0x80uy
+            ({ s with Stopped = 8200 }, 4)
+          else
+            // DMG / 非 CGB モード / 未アーム時は速度切替なし
+            // (STOP 本来の低消費電力動作は未実装)
+            (s, 4)
 
         // ADD SP, e8 (0xE8): SP = SP + signed immediate
         | AddSpE8 ->
@@ -950,11 +980,7 @@ module Decoder =
           (advancePc 1 state, 4) // Default for unimplemented
 
     // PPU・APU・Joypad・Timerを更新
-    let (ppu, mem1) = Ppu.step cycles newState.Ppu newState.Mem
-    let (apu, mem2) = Apu.step cycles newState.Apu mem1
-    let (joypad, mem3) = Joypad.sync newState.Joypad mem2
-    let (timer, mem4) = Timer.step cycles newState.Timer mem3
-    ({ newState with Ppu = ppu; Apu = apu; Joypad = joypad; Timer = timer; Mem = mem4 }, cycles)
+    (stepPeripherals cycles newState, cycles)
 
   // ====================
   // Single Step with Interrupt Handling
@@ -967,8 +993,24 @@ module Decoder =
     // First, check for pending interrupts
     let pending = getPendingInterrupts state
 
+    // STOP で速度を切り替えた後の CPU 停止 (Pan Docs: 2050 M サイクル = 8200 T サイクル)。
+    // 停止中は命令を実行せず、DIV も進まない (Pan Docs: CGB Registers / KEY1)。
+    // 停止中の割込みの扱いは未検証のため、ここでは受け付けない。
+    if state.Stopped > 0 then
+      let cycles = min 4 state.Stopped
+      let doubleSpeed = state.Mem.CgbMode && (state.Mem.Io.[0x4D] &&& 0x80uy) <> 0uy
+      let slow = if doubleSpeed then cycles / 2 else cycles
+      let (ppu, mem1) = Ppu.step slow state.Ppu state.Mem
+      let (apu, mem2) = Apu.step slow state.Apu mem1
+      let (joypad, mem3) = Joypad.sync state.Joypad mem2
+      ({ state with
+          Stopped = state.Stopped - cycles
+          Ppu = ppu
+          Apu = apu
+          Joypad = joypad
+          Mem = mem3 }, cycles)
     // Handle HALT state
-    if state.Halted then
+    elif state.Halted then
       // Check if we should wake from HALT
       if pending <> 0uy then
         // Wake from HALT
@@ -977,31 +1019,19 @@ module Decoder =
         match handleInterrupt wokenState with
         | Some (interruptedState, cycles) ->
             // PPU・APU・Joypad・Timerを更新
-            let (ppu, mem1) = Ppu.step cycles interruptedState.Ppu interruptedState.Mem
-            let (apu, mem2) = Apu.step cycles interruptedState.Apu mem1
-            let (joypad, mem3) = Joypad.sync interruptedState.Joypad mem2
-            let (timer, mem4) = Timer.step cycles interruptedState.Timer mem3
-            ({ interruptedState with Ppu = ppu; Apu = apu; Joypad = joypad; Timer = timer; Mem = mem4 }, cycles)
+            (stepPeripherals cycles interruptedState, cycles)
         | None ->
             // IME is false, but we still wake from HALT and continue execution
             executeInstruction wokenState
       else
         // Still halted, just advance PPU/APU/Joypad/Timer
-        let (ppu, mem1) = Ppu.step 4 state.Ppu state.Mem
-        let (apu, mem2) = Apu.step 4 state.Apu mem1
-        let (joypad, mem3) = Joypad.sync state.Joypad mem2
-        let (timer, mem4) = Timer.step 4 state.Timer mem3
-        ({ state with Ppu = ppu; Apu = apu; Joypad = joypad; Timer = timer; Mem = mem4 }, 4)
+        (stepPeripherals 4 state, 4)
     else
       // Not halted - check for interrupts first
       match handleInterrupt state with
       | Some (interruptedState, cycles) ->
           // PPU・APU・Joypad・Timerを更新
-          let (ppu, mem1) = Ppu.step cycles interruptedState.Ppu interruptedState.Mem
-          let (apu, mem2) = Apu.step cycles interruptedState.Apu mem1
-          let (joypad, mem3) = Joypad.sync interruptedState.Joypad mem2
-          let (timer, mem4) = Timer.step cycles interruptedState.Timer mem3
-          ({ interruptedState with Ppu = ppu; Apu = apu; Joypad = joypad; Timer = timer; Mem = mem4 }, cycles)
+          (stepPeripherals cycles interruptedState, cycles)
       | None ->
           // No interrupt, execute normal instruction
           executeInstruction state
