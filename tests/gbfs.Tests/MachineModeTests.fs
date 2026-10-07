@@ -354,3 +354,54 @@ let ``倍速時は PPU が半分だけ進みタイマはそのまま進む`` () 
     Assert.Equal(4, cycles)
     Assert.Equal(ppuBefore + 2, st.Ppu.Cycles)                  // LCD は等速 → 半分
     Assert.Equal(timerBefore + 4us, st.Timer.InternalCounter)   // タイマは 2 倍 → そのまま
+
+// ============================================================
+// CGB パレット RAM (Pan Docs: Color Palettes)
+// ============================================================
+
+[<Fact>]
+let ``CGB パレットは BCPS の自動インクリメントで連続書き込みできる`` () =
+    let st = cgbState (makeCgbRom ())
+    // パレット 0 の色 0-3 に RGB555 を書く (BCPS bit7 = 自動インクリメント)
+    let colors = [| 0x001Fus; 0x03E0us; 0x7C00us; 0x7FFFus |]   // 赤, 緑, 青, 白
+    let mutable mem = Memory.write 0xFF68us 0x80uy st.Mem
+    for c in colors do
+        mem <- Memory.write 0xFF69us (byte (c &&& 0xFFus)) mem
+        mem <- Memory.write 0xFF69us (byte (c >>> 8)) mem
+    // 8 バイト書いたのでインデックスは 8 に進む
+    Assert.Equal(0x88uy, Memory.read 0xFF68us mem)
+    Assert.Equal(0x001Fus, Memory.bgPaletteColor 0 0 mem)
+    Assert.Equal(0x03E0us, Memory.bgPaletteColor 0 1 mem)
+    Assert.Equal(0x7C00us, Memory.bgPaletteColor 0 2 mem)
+    Assert.Equal(0x7FFFus, Memory.bgPaletteColor 0 3 mem)
+
+[<Fact>]
+let ``CGB パレットは BCPS のインデックス指定で読み書きできる`` () =
+    let st = cgbState (makeCgbRom ())
+    // パレット 3 の色 2 はバイト 28 (下位) と 29 (上位)。自動インクリメントなしで 1 バイトずつ書く
+    let mem = Memory.write 0xFF68us 0x1Cuy st.Mem
+    let mem = Memory.write 0xFF69us 0xE4uy mem
+    let mem = Memory.write 0xFF68us 0x1Duy mem
+    let mem = Memory.write 0xFF69us 0x03uy mem
+    Assert.Equal(0x03E4us, Memory.bgPaletteColor 3 2 mem)
+    Assert.Equal(0x03uy, Memory.read 0xFF69us mem)   // インデックス 29 の内容
+
+[<Fact>]
+let ``OBJ パレットも OCPS/OCPD で書き込める`` () =
+    let st = cgbState (makeCgbRom ())
+    // パレット 5 の色 1 はバイト 42 (下位) と 43 (上位)
+    let mem = Memory.write 0xFF6Aus 0x2Auy st.Mem
+    let mem = Memory.write 0xFF6Bus 0x1Fuy mem
+    let mem = Memory.write 0xFF6Aus 0x2Buy mem
+    let mem = Memory.write 0xFF6Bus 0x00uy mem
+    Assert.Equal(0x001Fus, Memory.objPaletteColor 5 1 mem)
+    Assert.Equal(0x00uy, Memory.read 0xFF6Bus mem)
+
+[<Fact>]
+let ``非 CGB モードではパレット RAM は変化しない`` () =
+    // ヘッダ 0x0143 = 0x00 のカートは DMG 互換モード。パレット RAM は触られない
+    let st = cgbState (makeRom 0x01uy "" "TITLE")
+    let mem = Memory.write 0xFF68us 0x80uy st.Mem
+    let mem = Memory.write 0xFF69us 0x1Fuy mem
+    Assert.Equal(0x0000us, Memory.bgPaletteColor 0 0 mem)
+    Assert.Equal(0x1Fuy, Memory.read 0xFF69us mem)   // レジスタ値として保持される

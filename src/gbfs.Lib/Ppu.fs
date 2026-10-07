@@ -46,6 +46,22 @@ module Ppu =
         else // Sprite above BG/Window
             true
 
+    /// CGB の属性バイト (VRAM バンク 1) を読む。非 CGB モードには属性が無いので 0。
+    let private readTileAttributes (tileIndexAddr: uint16) (mem: Memory.MemoryBus) : byte =
+        if mem.CgbMode then Memory.readVram 1 (int tileIndexAddr - 0x8000) mem else 0uy
+
+    /// RGB555 を 4 階調 (0 = 白 .. 3 = 黒) に量子化する。
+    /// フレームバッファが 4 階調の byte 配列のため、CGB の色は今のところ輝度で近似する
+    /// (正確な色は RGB フレームバッファ導入後に出力する)。
+    /// CGB ゲームは BGP を 0x00 にしたまま CGB パレットを使うため、
+    /// BGP だけを見ると画面が真っ白になる (実 ROM で確認した症状)
+    let private shadeOfRgb (rgb: uint16) : byte =
+        let r = int (rgb &&& 0x1Fus)
+        let g = int ((rgb >>> 5) &&& 0x1Fus)
+        let b = int ((rgb >>> 10) &&& 0x1Fus)
+        let luma = (r * 299 + g * 587 + b * 114) / 1000 // 0-31
+        byte (3 - min 3 (luma / 8))
+
     /// Represents a single sprite's attributes from OAM.
     type PpuMode =
         | HBlank  // Mode 0
@@ -209,6 +225,9 @@ module Ppu =
                 
                 let tileIndexAddr = windowTileMapBase + uint16 tileMapIndex
                 let tileIndex = int (Memory.readVramBank0 tileIndexAddr mem)
+                // CGB: 属性 (パレット番号 / タイルデータのバンク)
+                let attributes = readTileAttributes tileIndexAddr mem
+                let tileBank = if (attributes &&& 0x08uy) <> 0uy then 1 else 0
 
                 let tilePatternAddr =
                     if signedTileIndex then
@@ -220,8 +239,8 @@ module Ppu =
                 let pixelYInTile = int (windowLine % 8uy)
                 let tileRowAddr = tilePatternAddr + uint16 (pixelYInTile * 2)
                 
-                let byte1 = Memory.readVramBank0 tileRowAddr mem
-                let byte2 = Memory.readVramBank0 (tileRowAddr + 1us) mem
+                let byte1 = Memory.readVram tileBank (int tileRowAddr - 0x8000) mem
+                let byte2 = Memory.readVram tileBank (int (tileRowAddr + 1us) - 0x8000) mem
 
                 let pixelXInTile = 7 - (windowPixelX % 8)
                 let colorBit1 = (byte1 >>> pixelXInTile) &&& 1uy
@@ -229,12 +248,15 @@ module Ppu =
                 let colorId = (colorBit2 <<< 1) ||| colorBit1
 
                 color <-
-                    match colorId with
-                    | 0uy -> bgp &&& 0x03uy
-                    | 1uy -> (bgp >>> 2) &&& 0x03uy
-                    | 2uy -> (bgp >>> 4) &&& 0x03uy
-                    | 3uy -> (bgp >>> 6) &&& 0x03uy
-                    | _ -> 0uy // Should not happen
+                    if mem.CgbMode then
+                        shadeOfRgb (Memory.bgPaletteColor (int (attributes &&& 0x07uy)) (int colorId) mem)
+                    else
+                        match colorId with
+                        | 0uy -> bgp &&& 0x03uy
+                        | 1uy -> (bgp >>> 2) &&& 0x03uy
+                        | 2uy -> (bgp >>> 4) &&& 0x03uy
+                        | 3uy -> (bgp >>> 6) &&& 0x03uy
+                        | _ -> 0uy // Should not happen
             else if bgAndWindowDisplayEnable then
                 // --- Render Background Pixel (if not in window) ---
                 let scy = Memory.read SCY mem
@@ -252,6 +274,9 @@ module Ppu =
                 
                 let tileIndexAddr = bgTileMapBase + uint16 tileMapIndex
                 let tileIndex = int (Memory.readVramBank0 tileIndexAddr mem)
+                // CGB: 属性 (パレット番号 / タイルデータのバンク)
+                let attributes = readTileAttributes tileIndexAddr mem
+                let tileBank = if (attributes &&& 0x08uy) <> 0uy then 1 else 0
 
                 let tilePatternAddr =
                     if signedTileIndex then
@@ -263,8 +288,8 @@ module Ppu =
                 let pixelYInTile = int (y % 8uy)
                 let tileRowAddr = tilePatternAddr + uint16 (pixelYInTile * 2)
                 
-                let byte1 = Memory.readVramBank0 tileRowAddr mem
-                let byte2 = Memory.readVramBank0 (tileRowAddr + 1us) mem
+                let byte1 = Memory.readVram tileBank (int tileRowAddr - 0x8000) mem
+                let byte2 = Memory.readVram tileBank (int (tileRowAddr + 1us) - 0x8000) mem
 
                 let pixelXInTile = 7 - (int (mapX % 8us))
                 let colorBit1 = (byte1 >>> pixelXInTile) &&& 1uy
@@ -272,12 +297,15 @@ module Ppu =
                 let colorId = (colorBit2 <<< 1) ||| colorBit1
 
                 color <-
-                    match colorId with
-                    | 0uy -> bgp &&& 0x03uy
-                    | 1uy -> (bgp >>> 2) &&& 0x03uy
-                    | 2uy -> (bgp >>> 4) &&& 0x03uy
-                    | 3uy -> (bgp >>> 6) &&& 0x03uy
-                    | _ -> 0uy // Should not happen
+                    if mem.CgbMode then
+                        shadeOfRgb (Memory.bgPaletteColor (int (attributes &&& 0x07uy)) (int colorId) mem)
+                    else
+                        match colorId with
+                        | 0uy -> bgp &&& 0x03uy
+                        | 1uy -> (bgp >>> 2) &&& 0x03uy
+                        | 2uy -> (bgp >>> 4) &&& 0x03uy
+                        | 3uy -> (bgp >>> 6) &&& 0x03uy
+                        | _ -> 0uy // Should not happen
             
             currentPpuState.FrameBuffer.[fbIndex] <- color
         
