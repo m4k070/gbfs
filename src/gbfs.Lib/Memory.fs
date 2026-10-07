@@ -154,6 +154,10 @@ module Memory =
     DmaRequest: bool
     Oam: byte array        // 160 bytes OAM
     Io: byte array         // 128 bytes I/O
+    /// CGB の BG パレット RAM (8 パレット × 4 色 × 2 バイト = RGB555 リトルエンディアン)
+    BgPalette: byte array
+    /// CGB の OBJ パレット RAM (同上)
+    ObjPalette: byte array
     Hram: byte array       // 127 bytes High RAM
     Ie: byte               // Interrupt Enable Register
     Mbc: MbcState          // MBC state
@@ -280,6 +284,8 @@ module Memory =
     DmaRequest = false
     Oam = Array.zeroCreate 0xA0        // 160 bytes OAM
     Io = Array.copy (postBootIoFor machine)  // 128 bytes I/O (電源投入直後の値)
+    BgPalette = Array.zeroCreate 64    // CGB: 8 パレット × 4 色 × 2 バイト
+    ObjPalette = Array.zeroCreate 64
     Hram = Array.zeroCreate 0x7F       // 127 bytes High RAM
     Ie = 0uy
     Mbc =
@@ -398,6 +404,20 @@ module Memory =
   let readVramBank0 (addr: uint16) (mem: MemoryBus) : byte =
     readVram 0 (int addr - 0x8000) mem
 
+  /// CGB のパレット RAM から RGB555 の色を取り出す (Pan Docs: Color Palettes)。
+  /// パレット RAM は 8 パレット × 4 色 × 2 バイトで、色は RGB555 のリトルエンディアン。
+  let private paletteColor (palette: byte array) (paletteIndex: int) (colorIndex: int) : uint16 =
+    let i = ((paletteIndex &&& 0x07) * 4 + (colorIndex &&& 0x03)) * 2
+    uint16 palette.[i] ||| (uint16 palette.[i + 1] <<< 8)
+
+  /// BG パレットの色 (CGB モードのみ意味を持つ)
+  let bgPaletteColor (paletteIndex: int) (colorIndex: int) (mem: MemoryBus) : uint16 =
+    paletteColor mem.BgPalette paletteIndex colorIndex
+
+  /// OBJ パレットの色 (CGB モードのみ意味を持つ)
+  let objPaletteColor (paletteIndex: int) (colorIndex: int) (mem: MemoryBus) : uint16 =
+    paletteColor mem.ObjPalette paletteIndex colorIndex
+
   let read (addr: uint16) (mem: MemoryBus) : byte =
     let a = int addr
     match a with
@@ -459,6 +479,9 @@ module Memory =
       | 0xFF70 -> if mem.CgbMode then 0xF8uy ||| (value &&& 0x07uy) else 0xFFuy    // SVBK
       | 0xFF74 -> if mem.CgbMode then value else 0xFFuy                           // 未定義 (CGB モードでは読み書き可)
       | 0xFF75 -> (value &&& 0x70uy) ||| 0x8Fuy                                   // 未定義 (bit4-6 のみ読み書き可)
+      // CGB のパレット RAM。非 CGB モードではレジスタ値 (起動値) をそのまま返す
+      | 0xFF69 -> if mem.CgbMode then mem.BgPalette.[int (mem.Io.[0x68] &&& 0x3Fuy)] else value
+      | 0xFF6B -> if mem.CgbMode then mem.ObjPalette.[int (mem.Io.[0x6A] &&& 0x3Fuy)] else value
       | _ -> value
     | _ when a < 0xFFFF ->
       // HRAM
@@ -573,6 +596,26 @@ module Memory =
       | 0xFF46 ->       // OAM DMA の要求 (転送は PPU が行う)
         mem.Io.[0x46] <- value
         { mem with DmaRequest = true }
+      // CGB のパレット RAM。BCPS/OCPS (0xFF68/0xFF6A) が bit7 = 自動インクリメント、bit0-5 = インデックス。
+      // 非 CGB モードでは従来どおりレジスタ値として保持する (起動値の検証を壊さないため)
+      | 0xFF68 -> mem.Io.[0x68] <- value; mem
+      | 0xFF69 ->
+        if mem.CgbMode then
+          let idx = int (mem.Io.[0x68] &&& 0x3Fuy)
+          mem.BgPalette.[idx] <- value
+          if (mem.Io.[0x68] &&& 0x80uy) <> 0uy then
+            mem.Io.[0x68] <- (mem.Io.[0x68] &&& 0x80uy) ||| byte ((idx + 1) &&& 0x3F)
+        else mem.Io.[0x69] <- value
+        mem
+      | 0xFF6A -> mem.Io.[0x6A] <- value; mem
+      | 0xFF6B ->
+        if mem.CgbMode then
+          let idx = int (mem.Io.[0x6A] &&& 0x3Fuy)
+          mem.ObjPalette.[idx] <- value
+          if (mem.Io.[0x6A] &&& 0x80uy) <> 0uy then
+            mem.Io.[0x6A] <- (mem.Io.[0x6A] &&& 0x80uy) ||| byte ((idx + 1) &&& 0x3F)
+        else mem.Io.[0x6B] <- value
+        mem
       | 0xFF74 ->       // 未定義 (CGB モードでは読み書き可)
         if mem.CgbMode then mem.Io.[0x74] <- value
         mem
