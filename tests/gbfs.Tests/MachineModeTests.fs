@@ -245,6 +245,34 @@ let ``C000-CFFF はバンク 0 固定で Echo RAM も同じバンクを見る`` 
     let mem = Memory.write 0xE100us 0xDDuy mem                // Echo RAM への書き込み
     Assert.Equal(0xDDuy, Memory.read 0xC100us mem)
 
+[<Fact>]
+let ``CGB モードの起動時レジスタは Pan Docs の CGB 列に一致する`` () =
+    let st = cgbState (makeCgbRom ())   // ヘッダ 0x0143 = 0x80 → CGB モード
+    Assert.Equal(0xFFuy, byte (st.Regs.DE >>> 8))            // D = 0xFF
+    Assert.Equal(0x56uy, byte (st.Regs.DE &&& 0xFFus))       // E = 0x56
+    Assert.Equal(0x000Dus, st.Regs.HL)                       // HL = 0x000D
+
+[<Fact>]
+let ``CGB モードの I/O 起動値は Pan Docs の CGB 列に一致する`` () =
+    let st = cgbState (makeCgbRom ())
+    Assert.Equal(0xCFuy, Memory.read 0xFF00us st.Mem)   // P1
+    Assert.Equal(0x7Fuy, Memory.read 0xFF02us st.Mem)   // SC
+    Assert.Equal(0x00uy, Memory.read 0xFF46us st.Mem)   // DMA
+    Assert.Equal(0x3Euy, Memory.read 0xFF56us st.Mem)   // RP
+    Assert.Equal(0x7Euy, Memory.read 0xFF4Dus st.Mem)   // KEY1
+    Assert.Equal(0xFEuy, Memory.read 0xFF4Fus st.Mem)   // VBK
+    Assert.Equal(0xF8uy, Memory.read 0xFF70us st.Mem)   // SVBK
+
+[<Fact>]
+let ``DMG 互換モードでは検証済みの起動値のまま`` () =
+    // ヘッダ 0x0143 = 0x00 → DMG 互換モード。mooneye misc/boot_regs-cgb / boot_hwio-C が検証している値
+    let st = cgbState (makeRom 0x01uy "" "TITLE")
+    Assert.Equal(0x00uy, byte (st.Regs.DE >>> 8))            // D = 0x00
+    Assert.Equal(0x08uy, byte (st.Regs.DE &&& 0xFFus))       // E = 0x08
+    Assert.Equal(0x007Cus, st.Regs.HL)                       // HL = 0x007C
+    Assert.Equal(0xFFuy, Memory.read 0xFF00us st.Mem)        // P1 (boot_hwio-C の期待値)
+    Assert.Equal(0xFFuy, Memory.read 0xFF46us st.Mem)        // DMA
+
 // ============================================================
 // Emulator のマシン種別
 // ============================================================

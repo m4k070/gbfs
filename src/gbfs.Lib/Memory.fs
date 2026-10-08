@@ -312,7 +312,14 @@ module Memory =
         // CGB モードの起動値。ブート ROM が書き込む値なので検証 ROM が無い (未検証)。
         // 非 CGB モード側の値は mooneye misc/boot_hwio-C で検証済み。
         let io = Array.copy mem.Io
+        // Pan Docs "Power-Up Sequence" の CGB 列 (CGB モードの値)。
+        // 非 CGB モード (DMG 互換) の値は mooneye misc/boot_hwio-C で検証済みだが、
+        // CGB モード側はブート ROM が書く値で検証 ROM が無い
+        io.[0x00] <- 0xCFuy   // P1: 0xCF (モデルによっては 0xC7)
+        io.[0x02] <- 0x7Fuy   // SC (DMG は 0x7E)
+        io.[0x46] <- 0x00uy   // DMA (DMG は 0xFF)
         io.[0x4D] <- 0x00uy   // KEY1: 通常速度 (bit7=0) / 未アーム (bit0=0)
+        io.[0x56] <- 0x3Euy   // RP (赤外線ポート)
         io.[0x6C] <- 0x00uy   // OPRI: CGB 方式のオブジェクト優先度
         io.[0x70] <- 0x00uy   // SVBK: 0 を書いた状態 (実効バンクは 1、読み出しは 0xF8)
         io.[0x74] <- 0x00uy   // 未定義レジスタ (CGB モードでは 0x00 から読み書きできる)
@@ -418,7 +425,19 @@ module Memory =
   let objPaletteColor (paletteIndex: int) (colorIndex: int) (mem: MemoryBus) : uint16 =
     paletteColor mem.ObjPalette paletteIndex colorIndex
 
+  /// 診断用: 読み出しアドレスを観測するフック (既定は無効)。
+  /// 実 ROM が「どのレジスタを待っているか」を特定するために使う。テストや通常実行では触らない
+  let mutable private readObserver: (uint16 -> unit) option = None
+  let setReadObserver (f: (uint16 -> unit) option) = readObserver <- f
+
+  /// 診断用: 書き込みアドレスと値を観測するフック (既定は無効)
+  let mutable private writeObserver: (uint16 -> byte -> unit) option = None
+  let setWriteObserver (f: (uint16 -> byte -> unit) option) = writeObserver <- f
+
   let read (addr: uint16) (mem: MemoryBus) : byte =
+    (match readObserver with
+     | Some f -> f addr
+     | None -> ())
     let a = int addr
     match a with
     | _ when a < 0x4000 ->
@@ -512,6 +531,9 @@ module Memory =
         mem
 
   let write (addr: uint16) (value: byte) (mem: MemoryBus) : MemoryBus =
+    (match writeObserver with
+     | Some f -> f addr value
+     | None -> ())
     let a = int addr
     match a with
     | _ when a < 0x4000 ->
