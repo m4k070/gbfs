@@ -274,6 +274,36 @@ let ``DMG 互換モードでは検証済みの起動値のまま`` () =
     Assert.Equal(0xFFuy, Memory.read 0xFF46us st.Mem)        // DMA
 
 // ============================================================
+// シリアル転送
+// ============================================================
+
+[<Fact>]
+let ``シリアル転送は 4096 サイクルで完了し SB=0xFF / SC bit7 クリア / IF bit3`` () =
+    let mem =
+        Memory.createWith Memory.Cgb ()
+        |> Memory.write 0xFF01us 0x42uy
+        |> Memory.write 0xFF02us 0x81uy          // 内部クロックで転送開始
+    Assert.Equal(4096, mem.SerialCycles)
+    let midway = Memory.tickSerial 4095 mem
+    Assert.Equal(1, midway.SerialCycles)
+    Assert.Equal(0x81uy, Memory.read 0xFF02us midway)   // まだ転送中
+    let doneMem = Memory.tickSerial 1 midway
+    Assert.Equal(0, doneMem.SerialCycles)
+    Assert.Equal(0xFFuy, Memory.read 0xFF01us doneMem)  // SB: 相手なし
+    Assert.Equal(0x01uy, Memory.read 0xFF02us doneMem)  // bit7 クリア
+    Assert.Equal(0x08, int (Memory.read 0xFF0Fus doneMem) &&& 0x08)   // シリアル割込み
+
+[<Fact>]
+let ``シリアルの高速モードは 128 サイクルで完了する`` () =
+    let mem = Memory.createWith Memory.Cgb () |> Memory.write 0xFF02us 0x83uy
+    Assert.Equal(128, mem.SerialCycles)
+
+[<Fact>]
+let ``外部クロックのシリアル転送は開始しない`` () =
+    let mem = Memory.createWith Memory.Cgb () |> Memory.write 0xFF02us 0x80uy
+    Assert.Equal(0, mem.SerialCycles)
+
+// ============================================================
 // Emulator のマシン種別
 // ============================================================
 

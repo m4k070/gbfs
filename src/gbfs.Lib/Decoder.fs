@@ -477,7 +477,9 @@ module Decoder =
     let (apu, mem2) = Apu.step slow st.Apu mem1
     let (joypad, mem3) = Joypad.sync st.Joypad mem2
     let (timer, mem4) = Timer.step cycles st.Timer mem3
-    { st with Ppu = ppu; Apu = apu; Joypad = joypad; Timer = timer; Mem = mem4 }
+    // シリアルは倍速でも 2 倍で動くので CPU の T サイクルをそのまま渡す (タイマと同じ)
+    let mem5 = Memory.tickSerial cycles mem4
+    { st with Ppu = ppu; Apu = apu; Joypad = joypad; Timer = timer; Mem = mem5 }
 
   /// Executes a single instruction and returns the new state with PPU updated
   /// 1 命令を実行し、(新しい状態, 消費サイクル数 (T サイクル)) を返す
