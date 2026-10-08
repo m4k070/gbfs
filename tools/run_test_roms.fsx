@@ -187,19 +187,13 @@ let nextInstructionAddr (cpu: Decoder.CpuState) : uint16 option =
     elif cpu.HaltBug then Some (cpu.Regs.PC + 1us)
     else Some cpu.Regs.PC
 
-/// SC に転送開始が書かれていれば 1 バイト受け取り、転送完了状態にする
-let pollSerial (mem: Memory.MemoryBus) : Memory.MemoryBus * byte option =
+/// SC bit7 が 0→1 になった瞬間に送信バイトを拾う。
+/// 転送の完了 (SB = 0xFF / SC bit7 クリア / IF bit3) はエミュレータ側の Memory.tickSerial が行う
+let pollSerial (prevSc: byte) (mem: Memory.MemoryBus) : byte option =
     let sc = Memory.read SerialControlAddr mem
-    if sc <> SerialStartInternalClock then (mem, None)
-    else
-        let value = Memory.read SerialDataAddr mem
-        let ifReg = Memory.read InterruptFlagAddr mem
-        let completed =
-            mem
-            |> Memory.write SerialDataAddr SerialNoPartnerByte
-            |> Memory.write SerialControlAddr (sc &&& 0x7Fuy)
-            |> Memory.write InterruptFlagAddr (ifReg ||| SerialInterruptBit)
-        (completed, Some value)
+    if (sc &&& 0x80uy) <> 0uy && (prevSc &&& 0x80uy) = 0uy then
+        Some (Memory.read SerialDataAddr mem)
+    else None
 
 // ============================================================
 // 1 本の実行
@@ -247,10 +241,10 @@ let runRom (protocol: Protocol) (machine: Memory.MachineMode) (maxSeconds: float
         | None -> ()
 
         if not finished then
+            let prevSc = Memory.read SerialControlAddr cpu.Mem
             let (next, stepCycles) = Decoder.stepWithCycles cpu
-            let (mem, received) = pollSerial next.Mem
-            cpu <- { next with Mem = mem }
-            received |> Option.iter (fun b -> serial.Append(char b) |> ignore)
+            cpu <- next
+            pollSerial prevSc cpu.Mem |> Option.iter (fun b -> serial.Append(char b) |> ignore)
             cycles <- cycles + int64 stepCycles
             steps <- steps + 1
 

@@ -152,6 +152,8 @@ module Memory =
     /// OAM DMA (0xFF46) の転送要求。0xFF46 への書き込みで立ち、PPU が転送して消費する。
     /// レジスタ値だけで判定すると電源投入直後の 0xFF46 = 0xFF で誤って転送してしまう
     DmaRequest: bool
+    /// シリアル転送の残りサイクル (0 = 転送中でない)。完了処理は Memory.tickSerial が行う
+    SerialCycles: int
     Oam: byte array        // 160 bytes OAM
     Io: byte array         // 128 bytes I/O
     /// CGB の BG パレット RAM (8 パレット × 4 色 × 2 バイト = RGB555 リトルエンディアン)
@@ -282,6 +284,7 @@ module Memory =
     ExtRam = Array.zeroCreate 0x2000   // 8KB External RAM
     Wram = Array.zeroCreate 0x8000     // 32KB Work RAM (CGB の 8 バンク分)
     DmaRequest = false
+    SerialCycles = 0
     Oam = Array.zeroCreate 0xA0        // 160 bytes OAM
     Io = Array.copy (postBootIoFor machine)  // 128 bytes I/O (電源投入直後の値)
     BgPalette = Array.zeroCreate 64    // CGB: 8 パレット × 4 色 × 2 バイト
@@ -618,6 +621,13 @@ module Memory =
       | 0xFF46 ->       // OAM DMA の要求 (転送は PPU が行う)
         mem.Io.[0x46] <- value
         { mem with DmaRequest = true }
+      | 0xFF02 ->       // SC: bit7 = 転送開始。内部クロック (bit0=1) のみ完了まで進める
+        mem.Io.[0x02] <- value
+        if (value &&& 0x81uy) = 0x81uy then
+          // 通常 8192 Hz → 512 サイクル/ビット = 4096 サイクル/バイト
+          // bit1 = 1 の高速モードは 262144 Hz → 16 サイクル/ビット = 128 サイクル/バイト
+          { mem with SerialCycles = (if (value &&& 0x02uy) <> 0uy then 128 else 4096) }
+        else mem
       // CGB のパレット RAM。BCPS/OCPS (0xFF68/0xFF6A) が bit7 = 自動インクリメント、bit0-5 = インデックス。
       // 非 CGB モードでは従来どおりレジスタ値として保持する (起動値の検証を壊さないため)
       | 0xFF68 -> mem.Io.[0x68] <- value; mem
@@ -683,3 +693,17 @@ module Memory =
           | SerialInterrupt -> ifReg ||| 0x08uy
           | JoypadInterrupt -> ifReg ||| 0x10uy
       write 0xFF0Fus newIfReg mem
+
+  /// シリアル転送を cycles 分進める。完了したら「相手なし」として
+  /// SB = 0xFF / SC bit7 = 0 / シリアル割込み (IF bit3) を要求する。
+  /// 外部クロック (SC bit0 = 0) の転送は相手が必要なので開始しない (SerialCycles は 0 のまま)
+  let tickSerial (cycles: int) (mem: MemoryBus) : MemoryBus =
+    if mem.SerialCycles = 0 then mem
+    else
+      let remaining = mem.SerialCycles - cycles
+      if remaining > 0 then { mem with SerialCycles = remaining }
+      else
+        let m = { mem with SerialCycles = 0 }
+        m.Io.[0x01] <- 0xFFuy                        // SB: 受信バイト (相手なし)
+        m.Io.[0x02] <- m.Io.[0x02] &&& 0x7Fuy        // SC bit7 クリア (転送完了)
+        requestInterrupt SerialInterrupt m
