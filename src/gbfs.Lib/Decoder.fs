@@ -283,8 +283,17 @@ module Decoder =
     let regs =
       match mem.Machine with
       | Memory.Cgb ->
+        // B は両モード共通 (Pan Docs 脚注 3)。DE/HL の CGB モード値は CgbMode のときだけ適用する。
+        // DMG 互換モードの D=0x00, E=0x08, HL=0x007C は mooneye misc/boot_regs-cgb が検証している
         let b = uint16 (Memory.cgbBootB rom)
-        { state.Regs with BC = (state.Regs.BC &&& 0x00FFus) ||| (b <<< 8) }
+        let bc = (state.Regs.BC &&& 0x00FFus) ||| (b <<< 8)
+        if mem.CgbMode then
+          // Pan Docs "Power-Up Sequence" の CGB 列: D = 0xFF, E = 0x56,
+          // HL = 0x991A (B が 0x43 / 0x58 のとき)、それ以外は 0x000D (脚注 4)
+          let hl = if b = 0x43us || b = 0x58us then 0x991Aus else 0x000Dus
+          { state.Regs with BC = bc; DE = 0xFF56us; HL = hl }
+        else
+          { state.Regs with BC = bc }
       | Memory.Dmg -> state.Regs
     { state with Regs = regs; Mem = mem }
 
