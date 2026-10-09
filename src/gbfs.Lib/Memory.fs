@@ -533,6 +533,61 @@ module Memory =
           mem.ExtRam.[(bank * 0x2000 + offset) &&& (mem.ExtRam.Length - 1)] <- value
         mem
 
+  // --- CGB の HDMA/GDMA (Pan Docs: CGB Registers) ---
+  // 0xFF51-0xFF54 = 転送元/転送先アドレス、0xFF55 = 制御 (bit7: 0 = GDMA 即時転送 / 1 = HDMA)。
+  // HDMA は HBlank ごとに 16 バイトを転送し、転送中は 0xFF55 の bit7 が 0 になる。
+  // 未実装だったため、CGB ソフトが要求した VRAM 転送が一切起きていなかった。
+
+  /// HDMA/GDMA の転送元アドレス。0xFF52 の下位 4 ビットは無視される (16 バイト境界)
+  let hdmaSourceAddress (mem: MemoryBus) : uint16 =
+    (uint16 mem.Io.[0x51] <<< 8) ||| uint16 (mem.Io.[0x52] &&& 0xF0uy)
+
+  /// HDMA/GDMA の転送先アドレス。VRAM ($8000-$9FF0) 内で、上位 3 ビットは無視される
+  let hdmaDestAddress (mem: MemoryBus) : uint16 =
+    0x8000us ||| (uint16 (mem.Io.[0x53] &&& 0x1Fuy) <<< 8) ||| uint16 (mem.Io.[0x54] &&& 0xF0uy)
+
+  /// HDMA が転送中か (0xFF55 の bit7 = 0 かつ CGB モード)
+  let hdmaActive (mem: MemoryBus) : bool =
+    mem.CgbMode && (mem.Io.[0x55] &&& 0x80uy) = 0uy
+
+  /// 16 バイト 1 ブロックを ROM/RAM から VRAM (現在の VBK バンク) へ転送し、両アドレスを進める
+  let hdmaTransferBlock (mem: MemoryBus) : MemoryBus =
+    let src = hdmaSourceAddress mem
+    let dst = hdmaDestAddress mem
+    let mutable m = mem
+    for i in 0 .. 15 do
+      m <- writeVram m.VramBank (int dst + i - 0x8000) (read (src + uint16 i) m) m
+    let srcNext = src + 16us
+    let dstNext = dst + 16us
+    m.Io.[0x51] <- byte (srcNext >>> 8)
+    m.Io.[0x52] <- byte (srcNext &&& 0xFFus)
+    m.Io.[0x53] <- byte ((dstNext >>> 8) &&& 0x1Fus) // VRAM 内で折り返す
+    m.Io.[0x54] <- byte (dstNext &&& 0xF0us)
+    m
+
+  /// GDMA: 指定ブロック数を即座に転送して完了させる (0xFF55 に bit7 = 0 を書いたとき)
+  let gdmaTransfer (blocks: int) (mem: MemoryBus) : MemoryBus =
+    let mutable m = mem
+    for _ in 1 .. blocks do
+      m <- hdmaTransferBlock m
+    m.Io.[0x55] <- 0xFFuy // 完了 (bit7 = 1 = 非アクティブ, 残り = 0x7F)
+    m
+
+  /// HDMA の 1 ライン分 (16 バイト) を転送する。HBlank 開始時に PPU から呼ばれる。
+  /// 残りが 0 になったら 0xFF55 を 0xFF (非アクティブ) に戻す。
+  let hdmaStep (mem: MemoryBus) : MemoryBus =
+    if not (hdmaActive mem) then
+      mem
+    else
+      let m = hdmaTransferBlock mem
+      let remaining = int (m.Io.[0x55] &&& 0x7Fuy)
+      if remaining = 0 then
+        m.Io.[0x55] <- 0xFFuy
+        m
+      else
+        m.Io.[0x55] <- byte (remaining - 1)
+        m
+
   let write (addr: uint16) (value: byte) (mem: MemoryBus) : MemoryBus =
     (match writeObserver with
      | Some f -> f addr value
@@ -648,6 +703,18 @@ module Memory =
             mem.Io.[0x6A] <- (mem.Io.[0x6A] &&& 0x80uy) ||| byte ((idx + 1) &&& 0x3F)
         else mem.Io.[0x6B] <- value
         mem
+      | 0xFF51 | 0xFF52 | 0xFF53 | 0xFF54 -> // HDMA1-4: 転送元/転送先アドレス (CGB 専用)
+        if mem.CgbMode then mem.Io.[a - 0xFF00] <- value
+        mem
+      | 0xFF55 -> // HDMA5: bit7 = 0 → GDMA (即時転送) / bit7 = 1 → HDMA (1 ラインずつ)
+        if not mem.CgbMode then
+          mem
+        elif (value &&& 0x80uy) <> 0uy then
+          // bit7 = 0 にして「転送中」を表す (読み出しで bit7 = 0 = 進行中)
+          mem.Io.[0x55] <- value &&& 0x7Fuy
+          mem
+        else
+          gdmaTransfer ((int value &&& 0x7F) + 1) mem
       | 0xFF74 ->       // 未定義 (CGB モードでは読み書き可)
         if mem.CgbMode then mem.Io.[0x74] <- value
         mem
