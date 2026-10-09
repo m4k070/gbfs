@@ -382,6 +382,10 @@ module Ppu =
                 
                 newPpuState <- { newPpuState with Mode = HBlank; Cycles = newPpuState.Cycles - 172 }
 
+                // CGB の HDMA は HBlank 開始時に 16 バイト進む (可視ラインのみ)
+                if newPpuState.LY < 144uy then
+                    newMem <- Memory.hdmaStep newMem
+
         | HBlank ->
             if newPpuState.Cycles >= 204 then
                 newPpuState <- { newPpuState with Cycles = newPpuState.Cycles - 204 }
