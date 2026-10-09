@@ -168,6 +168,10 @@ module Emulator =
     let getFrameBuffer (state: EmulatorState) : byte array =
         state.Cpu.Ppu.FrameBuffer
 
+    /// 実際の色 (RGB888、160 * 144 * 3 バイト) のフレームバッファ。CGB のカラー出力用 (Issue #19)
+    let getRgbFrameBuffer (state: EmulatorState) : byte array =
+        state.Cpu.Ppu.RgbFrameBuffer
+
     /// Get the screen as ASCII art (for MCP / text-based consumption)
     let getScreenAsText (state: EmulatorState) : string =
         let fb = state.Cpu.Ppu.FrameBuffer

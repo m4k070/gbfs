@@ -62,6 +62,30 @@ module Ppu =
         let luma = (r * 299 + g * 587 + b * 114) / 1000 // 0-31
         byte (3 - min 3 (luma / 8))
 
+    /// RGB555 の各成分を 8 ビットに伸ばす (上位ビットを下位に複製する定石)
+    let private expand5 (v: int) : byte = byte ((v <<< 3) ||| (v >>> 2))
+
+    /// CGB のパレット色 (RGB555) を RGB バッファの 1 ピクセルに書く
+    let private writeRgb (buf: byte array) (index: int) (rgb: uint16) =
+        buf.[index * 3] <- expand5 (int (rgb &&& 0x1Fus))
+        buf.[index * 3 + 1] <- expand5 (int ((rgb >>> 5) &&& 0x1Fus))
+        buf.[index * 3 + 2] <- expand5 (int ((rgb >>> 10) &&& 0x1Fus))
+
+    /// DMG の 4 階調パレット (shade 0 = 最も淡い → 3 = 最も濃い)
+    let private dmgRgb = [|
+        (0x9Buy, 0xBCuy, 0x0Fuy)
+        (0x8Buy, 0xACuy, 0x0Fuy)
+        (0x30uy, 0x62uy, 0x30uy)
+        (0x0Fuy, 0x38uy, 0x0Fuy)
+    |]
+
+    /// DMG の階調インデックスを RGB バッファに書く
+    let private writeDmgRgb (buf: byte array) (index: int) (shade: byte) =
+        let (r, g, b) = dmgRgb.[int shade &&& 3]
+        buf.[index * 3] <- r
+        buf.[index * 3 + 1] <- g
+        buf.[index * 3 + 2] <- b
+
     /// Represents a single sprite's attributes from OAM.
     type PpuMode =
         | HBlank  // Mode 0
@@ -74,6 +98,10 @@ module Ppu =
         Cycles: int
         LY: byte // Current scanline (0-153)
         FrameBuffer: byte array // 160 * 144 pixels, 4 shades of gray
+        /// 実際の色を入れた RGB バッファ (160 * 144 * 3 バイト、R,G,B の順)。
+        /// CGB はパレット RAM の RGB555 を 8 ビットに伸ばした値、DMG は 4 階調を緑系パレットに写した値。
+        /// 4 階調の FrameBuffer は DMG 互換と既存テストのために残す (Issue #19)。
+        RgbFrameBuffer: byte array
     }
 
     let create () = {
@@ -81,6 +109,7 @@ module Ppu =
         Cycles = 0
         LY = 0uy
         FrameBuffer = Array.zeroCreate (160 * 144)
+        RgbFrameBuffer = Array.zeroCreate (160 * 144 * 3)
     }
 
     /// Reads all 40 sprites from OAM and parses their attributes.
@@ -95,7 +124,9 @@ module Ppu =
             let bgAndWindowOverOam = (attributes &&& 0x80uy) <> 0uy // Bit 7
             let yFlip = (attributes &&& 0x40uy) <> 0uy // Bit 6
             let xFlip = (attributes &&& 0x20uy) <> 0uy // Bit 5
-            let palette = (attributes &&& 0x10uy) >>> 4 // Bit 4
+            let palette =
+                if mem.CgbMode then attributes &&& 0x07uy      // CGB: パレット番号 (0-7)
+                else (attributes &&& 0x10uy) >>> 4            // DMG: 0=OBP0, 1=OBP1
             let priority = if bgAndWindowOverOam then 1uy else 0uy // Simpler priority: 0 is above BG/Window, 1 is behind
 
             yield {
@@ -152,13 +183,17 @@ module Ppu =
 
                     // Color ID 0 is transparent for sprites
                     if colorId <> 0uy then
-                        // Map color id to actual color using OBP0 or OBP1
+                        // Map color id to actual color.
+                        // CGB はパレット RAM (Palette は readOamSprites で 0-7 に解決済み)、DMG は OBP0/OBP1 の 2 ビット値
                         let color =
-                            match colorId with
-                            | 1uy -> (objPalette >>> 2) &&& 0x03uy
-                            | 2uy -> (objPalette >>> 4) &&& 0x03uy
-                            | 3uy -> (objPalette >>> 6) &&& 0x03uy
-                            | _ -> 0uy // Should not happen, as 0uy is transparent
+                            if mem.CgbMode then
+                                shadeOfRgb (Memory.objPaletteColor (int sprite.Palette) (int colorId) mem)
+                            else
+                                match colorId with
+                                | 1uy -> (objPalette >>> 2) &&& 0x03uy
+                                | 2uy -> (objPalette >>> 4) &&& 0x03uy
+                                | 3uy -> (objPalette >>> 6) &&& 0x03uy
+                                | _ -> 0uy // Should not happen, as 0uy is transparent
 
                         let fbIndex = (int ppuState.LY) * 160 + (int screenX)
                         
@@ -172,6 +207,11 @@ module Ppu =
                         // Apply priority:
                         if shouldDrawSpritePixel sprite currentBgPixel then
                             newFrameBuffer.[fbIndex] <- color
+                            // Issue #19: RGB バッファにも同じピクセルを書く
+                            (if mem.CgbMode then
+                                 writeRgb ppuState.RgbFrameBuffer fbIndex (Memory.objPaletteColor (int sprite.Palette) (int colorId) mem)
+                             else
+                                 writeDmgRgb ppuState.RgbFrameBuffer fbIndex color)
         
         { ppuState with FrameBuffer = newFrameBuffer }
 
@@ -257,6 +297,11 @@ module Ppu =
                         | 2uy -> (bgp >>> 4) &&& 0x03uy
                         | 3uy -> (bgp >>> 6) &&& 0x03uy
                         | _ -> 0uy // Should not happen
+                // Issue #19: 4 階調だけでなく実際の色も RGB バッファに書く
+                (if mem.CgbMode then
+                     writeRgb currentPpuState.RgbFrameBuffer fbIndex (Memory.bgPaletteColor (int (attributes &&& 0x07uy)) (int colorId) mem)
+                 else
+                     writeDmgRgb currentPpuState.RgbFrameBuffer fbIndex color)
             else if bgAndWindowDisplayEnable then
                 // --- Render Background Pixel (if not in window) ---
                 let scy = Memory.read SCY mem
@@ -306,6 +351,11 @@ module Ppu =
                         | 2uy -> (bgp >>> 4) &&& 0x03uy
                         | 3uy -> (bgp >>> 6) &&& 0x03uy
                         | _ -> 0uy // Should not happen
+                // Issue #19: 4 階調だけでなく実際の色も RGB バッファに書く
+                (if mem.CgbMode then
+                     writeRgb currentPpuState.RgbFrameBuffer fbIndex (Memory.bgPaletteColor (int (attributes &&& 0x07uy)) (int colorId) mem)
+                 else
+                     writeDmgRgb currentPpuState.RgbFrameBuffer fbIndex color)
             
             currentPpuState.FrameBuffer.[fbIndex] <- color
         
