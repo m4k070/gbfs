@@ -208,16 +208,16 @@ type MainWindow() as this =
     let audio = AudioOut.create ()
 
     let renderFrame () =
-        let fb = Emulator.getFrameBuffer model.State
-        if fb.Length >= 160 * 144 then
+        let rgb = Emulator.getRgbFrameBuffer model.State
+        if rgb.Length >= 160 * 144 * 3 then
             let locked = bitmap.Lock()
             try
                 let dst = NativePtr.ofNativeInt<byte> locked.Address
                 for i in 0 .. (160 * 144 - 1) do
-                    let color = palette.[int fb.[i] &&& 3]
-                    NativePtr.set dst (i * 4 + 0) (byte (color &&& 0xFFu))
-                    NativePtr.set dst (i * 4 + 1) (byte ((color >>> 8) &&& 0xFFu))
-                    NativePtr.set dst (i * 4 + 2) (byte ((color >>> 16) &&& 0xFFu))
+                    // Issue #19: PPU が実際の色を出しているので、そのまま BGRA に詰める
+                    NativePtr.set dst (i * 4 + 0) rgb.[i * 3 + 2] // B
+                    NativePtr.set dst (i * 4 + 1) rgb.[i * 3 + 1] // G
+                    NativePtr.set dst (i * 4 + 2) rgb.[i * 3]     // R
                     NativePtr.set dst (i * 4 + 3) 0xFFuy
             finally
                 locked.Dispose()

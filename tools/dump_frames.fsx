@@ -37,6 +37,27 @@ let private chunk (tag: string) (data: byte array) =
     let payload = Array.concat [ Text.Encoding.ASCII.GetBytes tag; data ]
     Array.concat [ be32 (uint32 data.Length); payload; be32 (crc32 payload) ]
 
+/// RGB888 (w * h * 3 バイト) をカラー PNG で書き出す (Issue #19)
+let writePngRgb (w: int) (h: int) (rgb: byte array) (path: string) =
+    let ihdr =
+        Array.concat [ be32 (uint32 w); be32 (uint32 h); [| 8uy; 2uy; 0uy; 0uy; 0uy |] ]  // 2 = truecolor
+    let raw = Array.zeroCreate ((w * 3 + 1) * h)
+    for y in 0 .. h - 1 do
+        raw.[y * (w * 3 + 1)] <- 0uy
+        Array.blit rgb (y * w * 3) raw (y * (w * 3 + 1) + 1) (w * 3)
+    let idat =
+        use ms = new MemoryStream()
+        (use z = new ZLibStream(ms, CompressionLevel.Optimal, true)
+         z.Write(raw, 0, raw.Length))
+        ms.ToArray()
+    let png =
+        Array.concat
+            [ [| 0x89uy; 0x50uy; 0x4Euy; 0x47uy; 0x0Duy; 0x0Auy; 0x1Auy; 0x0Auy |]
+              chunk "IHDR" ihdr
+              chunk "IDAT" idat
+              chunk "IEND" [||] ]
+    File.WriteAllBytes(path, png)
+
 let writePngGray (w: int) (h: int) (gray: byte array) (path: string) =
     let ihdr =
         Array.concat [ be32 (uint32 w); be32 (uint32 h); [| 8uy; 0uy; 0uy; 0uy; 0uy |] ]
@@ -105,7 +126,7 @@ let fb = Emulator.getFrameBuffer state
 let shades = fb |> Array.countBy id |> Array.sortBy fst
 let gray = fb |> Array.map (fun s -> byte (255 - 85 * int (min 3uy s)))
 
-writePngGray 160 144 gray outPath
+writePngRgb 160 144 (Emulator.getRgbFrameBuffer state) outPath
 sw.Stop()
 
 printfn "rom        = %s" (Path.GetFileName romPath)
