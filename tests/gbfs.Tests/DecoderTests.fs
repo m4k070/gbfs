@@ -411,7 +411,7 @@ module InterruptDispatchTests =
         Assert.Equal(0x0040us, finalState.Regs.PC)
         // Only VBlank flag should be cleared
         let ifReg = read IF_ADDR finalState.Mem
-        Assert.Equal(0x02uy, ifReg) // LCD STAT still pending
+        Assert.Equal(0xE2uy, ifReg) // LCD STAT still pending + 上位 3 ビットは常に 1
 
     [<Fact>]
     let ``HALT wakes up on interrupt with IME=true`` () =

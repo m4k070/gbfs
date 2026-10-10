@@ -677,6 +677,10 @@ module Memory =
       | 0xFF46 ->       // OAM DMA の要求 (転送は PPU が行う)
         mem.Io.[0x46] <- value
         { mem with DmaRequest = true }
+      | 0xFF0F ->       // IF: 上位 3 ビットは未使用で常に 1 として読める
+                        // (根拠: mooneye misc/boot_hwio の検証値 IF = 0xE1。Pan Docs は bit0-4 のみ記述)
+        mem.Io.[0x0F] <- value ||| 0xE0uy
+        mem
       | 0xFF02 ->       // SC: bit7 = 転送開始。内部クロック (bit0=1) のみ完了まで進める
         mem.Io.[0x02] <- value
         if (value &&& 0x81uy) = 0x81uy then { mem with SerialBits = 8 } else mem

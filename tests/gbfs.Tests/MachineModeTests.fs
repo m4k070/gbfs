@@ -273,6 +273,15 @@ let ``DMG 互換モードでは検証済みの起動値のまま`` () =
     Assert.Equal(0xFFuy, Memory.read 0xFF00us st.Mem)        // P1 (boot_hwio-C の期待値)
     Assert.Equal(0xFFuy, Memory.read 0xFF46us st.Mem)        // DMA
 
+[<Fact>]
+let ``IF の上位 3 ビットは書き込み後も 1 として読める`` () =
+    // 根拠: mooneye misc/boot_hwio の検証値 (IF = 0xE1)
+    let mem = Memory.createWith Memory.Dmg ()
+    let mem1 = Memory.write 0xFF0Fus 0x01uy mem
+    Assert.Equal(0xE1uy, Memory.read 0xFF0Fus mem1)
+    let mem2 = Memory.write 0xFF0Fus 0x00uy mem1
+    Assert.Equal(0xE0uy, Memory.read 0xFF0Fus mem2)
+
 // ============================================================
 // シリアル転送
 // ============================================================
