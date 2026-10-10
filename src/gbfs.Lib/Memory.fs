@@ -152,8 +152,9 @@ module Memory =
     /// OAM DMA (0xFF46) の転送要求。0xFF46 への書き込みで立ち、PPU が転送して消費する。
     /// レジスタ値だけで判定すると電源投入直後の 0xFF46 = 0xFF で誤って転送してしまう
     DmaRequest: bool
-    /// シリアル転送の残りサイクル (0 = 転送中でない)。完了処理は Memory.tickSerial が行う
-    SerialCycles: int
+    /// シリアル転送の残りビット数 (0 = 転送中でない)。
+    /// ビット境界は分周カウンタの位相で決まるため、残り時間ではなくビット数で持つ
+    SerialBits: int
     Oam: byte array        // 160 bytes OAM
     Io: byte array         // 128 bytes I/O
     /// CGB の BG パレット RAM (8 パレット × 4 色 × 2 バイト = RGB555 リトルエンディアン)
@@ -284,7 +285,7 @@ module Memory =
     ExtRam = Array.zeroCreate 0x2000   // 8KB External RAM
     Wram = Array.zeroCreate 0x8000     // 32KB Work RAM (CGB の 8 バンク分)
     DmaRequest = false
-    SerialCycles = 0
+    SerialBits = 0
     Oam = Array.zeroCreate 0xA0        // 160 bytes OAM
     Io = Array.copy (postBootIoFor machine)  // 128 bytes I/O (電源投入直後の値)
     BgPalette = Array.zeroCreate 64    // CGB: 8 パレット × 4 色 × 2 バイト
@@ -678,11 +679,7 @@ module Memory =
         { mem with DmaRequest = true }
       | 0xFF02 ->       // SC: bit7 = 転送開始。内部クロック (bit0=1) のみ完了まで進める
         mem.Io.[0x02] <- value
-        if (value &&& 0x81uy) = 0x81uy then
-          // 通常 8192 Hz → 512 サイクル/ビット = 4096 サイクル/バイト
-          // bit1 = 1 の高速モードは 262144 Hz → 16 サイクル/ビット = 128 サイクル/バイト
-          { mem with SerialCycles = (if (value &&& 0x02uy) <> 0uy then 128 else 4096) }
-        else mem
+        if (value &&& 0x81uy) = 0x81uy then { mem with SerialBits = 8 } else mem
       // CGB のパレット RAM。BCPS/OCPS (0xFF68/0xFF6A) が bit7 = 自動インクリメント、bit0-5 = インデックス。
       // 非 CGB モードでは従来どおりレジスタ値として保持する (起動値の検証を壊さないため)
       | 0xFF68 -> mem.Io.[0x68] <- value; mem
@@ -761,16 +758,37 @@ module Memory =
           | JoypadInterrupt -> ifReg ||| 0x10uy
       write 0xFF0Fus newIfReg mem
 
-  /// シリアル転送を cycles 分進める。完了したら「相手なし」として
-  /// SB = 0xFF / SC bit7 = 0 / シリアル割込み (IF bit3) を要求する。
-  /// 外部クロック (SC bit0 = 0) の転送は相手が必要なので開始しない (SerialCycles は 0 のまま)
-  let tickSerial (cycles: int) (mem: MemoryBus) : MemoryBus =
-    if mem.SerialCycles = 0 then mem
+  /// シリアル転送を cycles 分進める。ビット境界は分周カウンタ (DIV の元) の立ち下がり
+  /// エッジで決まる。mooneye acceptance/serial/boot_sclk_align の仕様:
+  /// 「serial clock is divided from the main clock with a big counter, so clock edges align
+  ///   based on the reset time, not the time when SC is written to」
+  /// (転送は即座には始まらず、次のエッジから始まる)。
+  /// 完了したら「相手なし」として SB = 0xFF / SC bit7 = 0 / シリアル割込み (IF bit3) を要求する。
+  /// 外部クロック (SC bit0 = 0) の転送は相手が必要なので開始しない (SerialBits は 0 のまま)
+  let tickSerial (counterBefore: int) (counterAfter: int) (mem: MemoryBus) : MemoryBus =
+    if mem.SerialBits = 0 then mem
     else
-      let remaining = mem.SerialCycles - cycles
-      if remaining > 0 then { mem with SerialCycles = remaining }
+      let sc = mem.Io.[0x02]
+      let fast = (sc &&& 0x02uy) <> 0uy
+      let doubleSpeed = mem.CgbMode && (mem.Io.[0x4D] &&& 0x80uy) <> 0uy
+      // 1 ビットの周期 (T サイクル) は通常 512 (8192 Hz) / 高速 16 (262144 Hz)。
+      // 倍速時は高速モードがさらに半分 (8 T)。分周カウンタは T サイクルで進み、DIV は
+      // 倍速でも 2 倍で進むので、通常モードの位相は倍速でも同じ (Pan Docs のクロック表と一致)
+      let toggleBit = if fast then (if doubleSpeed then 2 else 3) else 8
+      // ビット境界は分周カウンタの位相で決まる (SC を書いた時刻ではない)。
+      // カウンタは 16 ビットで巡回するので、差分をマスクして位相から回数を求める。
+      // 残差: mooneye boot_sclk_align は A=11 (期待 12) / B=90 (期待 91) の ±1 で FAIL する。
+      // 完了検出が命令単位 (stepPeripherals) なので、境界を跨いだ命令の末尾で完了する分の
+      // 粒度誤差が残る (サブ命令タイミングの実装 = Issue #23 と同じ制約)
+      let period = 1 <<< (toggleBit + 1)
+      let delta = (counterAfter - counterBefore) &&& 0xFFFF
+      let edges = ((counterBefore % period) + delta) / period
+      if edges <= 0 then mem
       else
-        let m = { mem with SerialCycles = 0 }
-        m.Io.[0x01] <- 0xFFuy                        // SB: 受信バイト (相手なし)
-        m.Io.[0x02] <- m.Io.[0x02] &&& 0x7Fuy        // SC bit7 クリア (転送完了)
-        requestInterrupt SerialInterrupt m
+        let remaining = mem.SerialBits - edges
+        if remaining > 0 then { mem with SerialBits = remaining }
+        else
+          let m = { mem with SerialBits = 0 }
+          m.Io.[0x01] <- 0xFFuy                        // SB: 受信バイト (相手なし)
+          m.Io.[0x02] <- m.Io.[0x02] &&& 0x7Fuy        // SC bit7 クリア (転送完了)
+          requestInterrupt SerialInterrupt m

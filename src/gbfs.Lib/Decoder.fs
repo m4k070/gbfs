@@ -477,8 +477,9 @@ module Decoder =
     let (apu, mem2) = Apu.step slow st.Apu mem1
     let (joypad, mem3) = Joypad.sync st.Joypad mem2
     let (timer, mem4) = Timer.step cycles st.Timer mem3
-    // シリアルは倍速でも 2 倍で動くので CPU の T サイクルをそのまま渡す (タイマと同じ)
-    let mem5 = Memory.tickSerial cycles mem4
+    // シリアルは分周カウンタ (タイマの内部カウンタ) の位相でビット境界が決まるので、
+    // タイマを進める前後のカウンタ値を渡す (倍速でも 2 倍で動くので T サイクルのまま)
+    let mem5 = Memory.tickSerial (int st.Timer.InternalCounter) (int timer.InternalCounter) mem4
     { st with Ppu = ppu; Apu = apu; Joypad = joypad; Timer = timer; Mem = mem5 }
 
   /// Executes a single instruction and returns the new state with PPU updated

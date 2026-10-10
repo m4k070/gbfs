@@ -278,30 +278,47 @@ let ``DMG 互換モードでは検証済みの起動値のまま`` () =
 // ============================================================
 
 [<Fact>]
-let ``シリアル転送は 4096 サイクルで完了し SB=0xFF / SC bit7 クリア / IF bit3`` () =
-    let mem =
+let ``シリアル転送は分周カウンタのエッジ 8 回で完了し SB=0xFF / SC bit7 クリア / IF bit3`` () =
+    // ビット境界は分周カウンタ (DIV の元) の位相で決まる (mooneye boot_sclk_align の仕様)。
+    // 位相 0 にそろえると bit8 の立ち下がりは 512 T ごと (1 ビット = 512 T = 8192 Hz)
+    let mem0 =
         Memory.createWith Memory.Cgb ()
         |> Memory.write 0xFF01us 0x42uy
         |> Memory.write 0xFF02us 0x81uy          // 内部クロックで転送開始
-    Assert.Equal(4096, mem.SerialCycles)
-    let midway = Memory.tickSerial 4095 mem
-    Assert.Equal(1, midway.SerialCycles)
+    let mem = mem0
+    Assert.Equal(8, mem.SerialBits)
+
+    // 分周カウンタの前後の値を渡す (実際の呼び出し順と同じ)
+    let step (fromCounter: int) (cycles: int) (m: Memory.MemoryBus) =
+        Memory.tickSerial fromCounter (fromCounter + cycles) m
+
+    let midway = step 0 3584 mem                        // 7 ビット分 (512 T × 7)
+    Assert.Equal(1, midway.SerialBits)
     Assert.Equal(0x81uy, Memory.read 0xFF02us midway)   // まだ転送中
-    let doneMem = Memory.tickSerial 1 midway
-    Assert.Equal(0, doneMem.SerialCycles)
+
+    let doneMem = step 3584 512 midway                  // 8 ビット目
+    Assert.Equal(0, doneMem.SerialBits)
     Assert.Equal(0xFFuy, Memory.read 0xFF01us doneMem)  // SB: 相手なし
     Assert.Equal(0x01uy, Memory.read 0xFF02us doneMem)  // bit7 クリア
     Assert.Equal(0x08, int (Memory.read 0xFF0Fus doneMem) &&& 0x08)   // シリアル割込み
 
 [<Fact>]
-let ``シリアルの高速モードは 128 サイクルで完了する`` () =
-    let mem = Memory.createWith Memory.Cgb () |> Memory.write 0xFF02us 0x83uy
-    Assert.Equal(128, mem.SerialCycles)
+let ``シリアル転送は SC を書いた時点では進まない（次のエッジから始まる）`` () =
+    let mem = Memory.createWith Memory.Cgb () |> Memory.write 0xFF02us 0x81uy
+    // カウンタ 0 → 255 T ではビット境界 (512 T) を跨がないので 1 ビットも進まない
+    let m2 = Memory.tickSerial 0 255 mem
+    Assert.Equal(8, m2.SerialBits)
+
+[<Fact>]
+let ``シリアルの高速モードは 16 T ごとに 1 ビット進む`` () =
+    let mem = Memory.createWith Memory.Cgb () |> Memory.write 0xFF02us 0x83uy   // bit1 = 高速 (262144 Hz = 16 T/ビット)
+    let doneMem = Memory.tickSerial 0 128 mem                                   // 8 ビット × 16 T
+    Assert.Equal(0, doneMem.SerialBits)
 
 [<Fact>]
 let ``外部クロックのシリアル転送は開始しない`` () =
     let mem = Memory.createWith Memory.Cgb () |> Memory.write 0xFF02us 0x80uy
-    Assert.Equal(0, mem.SerialCycles)
+    Assert.Equal(0, mem.SerialBits)
 
 // ============================================================
 // Emulator のマシン種別
