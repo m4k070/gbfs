@@ -27,9 +27,10 @@ module Ppu =
         XPos: int // X-coordinate (0-255, actual position is XPos - 8)
         TileIndex: byte // Tile number (0-255)
         Palette: byte // CGB Palette Number (0-7) / DMG Palette (0=OBP0, 1=OBP1)
+        TileBank: int // CGB: タイルデータの VRAM バンク (属性 bit3) / DMG: 常に 0
         XFlip: bool
         YFlip: bool
-        Priority: byte // 0=OBJ above BG/Window, 1=OBJ behind BG/Window
+        Priority: byte // OAM 属性 bit7: 0=OBJ above BG/Window, 1=OBJ behind BG/Window
         OAMIndex: int // Original index in OAM (for tie-breaking)
     }
 
@@ -38,13 +39,18 @@ module Ppu =
         if (lcdc &&& 0x04uy) = 0uy then 8 // Bit 2: OBJ (Sprite) Size (0=8x8, 1=8x16)
         else 16
 
-    /// Determines if a sprite pixel should be drawn based on its priority and the background pixel.
-    let private shouldDrawSpritePixel (sprite: Sprite) (currentBgPixel: byte) : bool =
-        if sprite.Priority = 1uy then // Sprite behind BG/Window
-            // Only draw sprite pixel if BG pixel is color 0 (transparent)
-            currentBgPixel = 0uy // Assuming 0 is the "transparent" BG color
-        else // Sprite above BG/Window
-            true
+    /// Determines if a sprite pixel should be drawn.
+    /// CGB は Pan Docs (Tile Maps) の規則: BG の色番号が 0 なら常に OBJ、
+    /// LCDC bit0 が 0 なら常に OBJ、それ以外は BG 属性 bit7 と OAM 属性 bit7 が
+    /// 両方 0 のときだけ OBJ。DMG は OAM 属性 bit7 が 1 のとき BG の色番号 0 でのみ描く。
+    let private shouldDrawSpritePixel
+        (sprite: Sprite) (bgColorIndex: byte) (bgTilePriority: bool) (lcdc: byte) (isCgb: bool) : bool =
+        if isCgb then
+            if bgColorIndex = 0uy then true
+            elif (lcdc &&& 0x01uy) = 0uy then true
+            else sprite.Priority = 0uy && not bgTilePriority
+        else
+            if sprite.Priority = 1uy then bgColorIndex = 0uy else true
 
     /// CGB の属性バイト (VRAM バンク 1) を読む。非 CGB モードには属性が無いので 0。
     let private readTileAttributes (tileIndexAddr: uint16) (mem: Memory.MemoryBus) : byte =
@@ -102,6 +108,11 @@ module Ppu =
         /// CGB はパレット RAM の RGB555 を 8 ビットに伸ばした値、DMG は 4 階調を緑系パレットに写した値。
         /// 4 階調の FrameBuffer は DMG 互換と既存テストのために残す (Issue #19)。
         RgbFrameBuffer: byte array
+        /// BG / ウィンドウの各ピクセルの色番号 (0-3)。OBJ との優先度判定に使う (Issue #21)。
+        /// FrameBuffer は 4 階調に量子化されるため色番号の代用にはならない (BGP で 0 以外に写りうる)
+        BgColorIndex: byte array
+        /// CGB: BG / ウィンドウのタイル属性 bit7 (1 = BG が OBJ より優先)。非 CGB では常に false
+        BgTilePriority: bool array
     }
 
     let create () = {
@@ -110,6 +121,8 @@ module Ppu =
         LY = 0uy
         FrameBuffer = Array.zeroCreate (160 * 144)
         RgbFrameBuffer = Array.zeroCreate (160 * 144 * 3)
+        BgColorIndex = Array.zeroCreate (160 * 144)
+        BgTilePriority = Array.zeroCreate (160 * 144)
     }
 
     /// Reads all 40 sprites from OAM and parses their attributes.
@@ -127,6 +140,8 @@ module Ppu =
             let palette =
                 if mem.CgbMode then attributes &&& 0x07uy      // CGB: パレット番号 (0-7)
                 else (attributes &&& 0x10uy) >>> 4            // DMG: 0=OBP0, 1=OBP1
+            // CGB: 属性 bit3 がタイルデータの VRAM バンクを選ぶ (DMG では未使用なので常にバンク 0)
+            let tileBank = if mem.CgbMode && (attributes &&& 0x08uy) <> 0uy then 1 else 0
             let priority = if bgAndWindowOverOam then 1uy else 0uy // Simpler priority: 0 is above BG/Window, 1 is behind
 
             yield {
@@ -134,6 +149,7 @@ module Ppu =
                 XPos = int x
                 TileIndex = tileIdx
                 Palette = palette
+                TileBank = tileBank
                 XFlip = xFlip
                 YFlip = yFlip
                 Priority = priority
@@ -163,8 +179,8 @@ module Ppu =
 
             let tileRowAddr = tilePatternAddr + uint16 (yTile * 2)
 
-            let byte1 = Memory.readVramBank0 tileRowAddr mem
-            let byte2 = Memory.readVramBank0 (tileRowAddr + 1us) mem
+            let byte1 = Memory.readVram sprite.TileBank (int tileRowAddr - 0x8000) mem
+            let byte2 = Memory.readVram sprite.TileBank (int (tileRowAddr + 1us) - 0x8000) mem
 
             // Determine which palette to use
             let objPalette = if sprite.Palette = 0uy then obp0 else obp1
@@ -201,11 +217,9 @@ module Ppu =
                         // If sprite.Priority = 1 (behind BG/Window), only draw if BG pixel is color 0
                         // (i.e., transparent or background color 0)
                         // If sprite.Priority = 0 (above BG/Window), always draw unless it's a BG color 0
-                        // which is actually a color, not transparent in BG logic.
-                        let currentBgPixel = ppuState.FrameBuffer.[fbIndex] // pixel already rendered for BG
-
-                        // Apply priority:
-                        if shouldDrawSpritePixel sprite currentBgPixel then
+                        // Apply priority (BG の色番号と属性は BG/ウィンドウの描画時に記録済み)
+                        let bgColorIndex = ppuState.BgColorIndex.[fbIndex]
+                        if shouldDrawSpritePixel sprite bgColorIndex ppuState.BgTilePriority.[fbIndex] lcdc mem.CgbMode then
                             newFrameBuffer.[fbIndex] <- color
                             // Issue #19: RGB バッファにも同じピクセルを書く
                             (if mem.CgbMode then
@@ -302,6 +316,9 @@ module Ppu =
                      writeRgb currentPpuState.RgbFrameBuffer fbIndex (Memory.bgPaletteColor (int (attributes &&& 0x07uy)) (int colorId) mem)
                  else
                      writeDmgRgb currentPpuState.RgbFrameBuffer fbIndex color)
+                // Issue #21: OBJ との優先度判定に使う BG の色番号と属性 bit7 を記録する
+                currentPpuState.BgColorIndex.[fbIndex] <- colorId
+                currentPpuState.BgTilePriority.[fbIndex] <- (attributes &&& 0x80uy) <> 0uy
             else if bgAndWindowDisplayEnable then
                 // --- Render Background Pixel (if not in window) ---
                 let scy = Memory.read SCY mem
@@ -356,6 +373,9 @@ module Ppu =
                      writeRgb currentPpuState.RgbFrameBuffer fbIndex (Memory.bgPaletteColor (int (attributes &&& 0x07uy)) (int colorId) mem)
                  else
                      writeDmgRgb currentPpuState.RgbFrameBuffer fbIndex color)
+                // Issue #21: OBJ との優先度判定に使う BG の色番号と属性 bit7 を記録する
+                currentPpuState.BgColorIndex.[fbIndex] <- colorId
+                currentPpuState.BgTilePriority.[fbIndex] <- (attributes &&& 0x80uy) <> 0uy
             
             currentPpuState.FrameBuffer.[fbIndex] <- color
         
