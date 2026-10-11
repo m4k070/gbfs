@@ -61,7 +61,26 @@ module Emulator =
           TotalCycles = 0L }
 
     let loadRom (rom: byte array) (state: EmulatorState) =
-        { state with Cpu = (implOf state).LoadRom rom state.Cpu }
+        let cpu = (implOf state).LoadRom rom state.Cpu
+        // CGB カートはブート ROM を実行しないので、その完了時点 (PC=0x0100) の状態を作る。
+        // I/O とパレットは Memory.loadRom が設定する。ここでは「ブート ROM が使った時間」に
+        // 相当する 2 つを合わせる。実測 (PyBoy, クリスタル JP):
+        //   - DIV = 0xC7  (ブート ROM は約 64.2 フレーム = 約 4.51M サイクル走る)
+        //   - LY  = 0x91 で VBlank 中にゲームへ渡す (ゲームはフレーム途中から始まる)
+        // 位相は DIV の下位 8 bit (サイクル) まで特定できないため 0 とする (±256 サイクル)。
+        let cpu =
+            if cpu.Mem.CgbMode then
+                // LY / STAT は PPU の状態とメモリ上の影 (Io.[0x44]/[0x41]) の両方を合わせる。
+                // ゲームは ldh でメモリ側を読むため、影を直さないと最初の読み出しが 0 になる。
+                let io = Array.copy cpu.Mem.Io
+                io.[0x44] <- 0x91uy                                  // LY: VBlank 中
+                io.[0x41] <- (io.[0x41] &&& 0xF8uy) ||| 0x01uy       // STAT: モード=VBlank, LYC フラグを落とす
+                { cpu with
+                    Timer = { cpu.Timer with InternalCounter = 0xC700us }
+                    Ppu = { cpu.Ppu with Mode = Ppu.VBlank; LY = 0x91uy; Cycles = 0 }
+                    Mem = { cpu.Mem with Io = io } }
+            else cpu
+        { state with Cpu = cpu }
 
     // ============================================================
     // Cartridge RAM (バッテリーバックアップ)

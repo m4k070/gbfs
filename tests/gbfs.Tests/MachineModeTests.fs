@@ -253,12 +253,14 @@ let ``CGB モードの起動時レジスタは Pan Docs の CGB 列に一致す�
     Assert.Equal(0x000Dus, st.Regs.HL)                       // HL = 0x000D
 
 [<Fact>]
-let ``CGB モードの I/O 起動値は Pan Docs の CGB 列に一致する`` () =
+let ``CGB モードの I/O 起動値は実測 (PyBoy のブート ROM 完了時点) に一致する`` () =
     let st = cgbState (makeCgbRom ())
-    Assert.Equal(0xCFuy, Memory.read 0xFF00us st.Mem)   // P1
-    Assert.Equal(0x7Fuy, Memory.read 0xFF02us st.Mem)   // SC
+    // 期待値は PyBoy でクリスタル JP を起動し PC が 0x0100 に達した瞬間の実測値。
+    // gbfs はブート ROM を実行しないため、その完了時点の値を直接作る。
+    Assert.Equal(0x00uy, Memory.read 0xFF00us st.Mem)   // P1
+    Assert.Equal(0x7Cuy, Memory.read 0xFF02us st.Mem)   // SC
     Assert.Equal(0x00uy, Memory.read 0xFF46us st.Mem)   // DMA
-    Assert.Equal(0x3Euy, Memory.read 0xFF56us st.Mem)   // RP
+    Assert.Equal(0xFFuy, Memory.read 0xFF56us st.Mem)   // RP
     Assert.Equal(0x7Euy, Memory.read 0xFF4Dus st.Mem)   // KEY1
     Assert.Equal(0xFEuy, Memory.read 0xFF4Fus st.Mem)   // VBK
     Assert.Equal(0xF8uy, Memory.read 0xFF70us st.Mem)   // SVBK

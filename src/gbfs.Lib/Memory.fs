@@ -313,25 +313,45 @@ module Memory =
     let io =
       if not cgbMode then mem.Io
       else
-        // CGB モードの起動値。ブート ROM が書き込む値なので検証 ROM が無い (未検証)。
-        // 非 CGB モード側の値は mooneye misc/boot_hwio-C で検証済み。
+        // CGB モードの起動値 (ブート ROM 完了時点 = PC 0x0100)。
+        // ブート ROM を実行しないので、その完了時点の値を直接作る。
+        // 出典: PyBoy (ブート ROM を実行する参照実装) でクリスタル JP を起動し、
+        //       PC が 0x0100 に達した瞬間の 0xFF00-0xFF7F を実測した値。
+        //       非 CGB (DMG 互換) 側の値は mooneye misc/boot_hwio-C で検証済みで、
+        //       こちらは変更しない。
         let io = Array.copy mem.Io
-        // Pan Docs "Power-Up Sequence" の CGB 列 (CGB モードの値)。
-        // 非 CGB モード (DMG 互換) の値は mooneye misc/boot_hwio-C で検証済みだが、
-        // CGB モード側はブート ROM が書く値で検証 ROM が無い
-        io.[0x00] <- 0xCFuy   // P1: 0xCF (モデルによっては 0xC7)
-        io.[0x02] <- 0x7Fuy   // SC (DMG は 0x7E)
+        io.[0x00] <- 0x00uy   // P1  (両ボタン群を選択したまま終わる)
+        io.[0x01] <- 0xFFuy   // SB
+        io.[0x02] <- 0x7Cuy   // SC  (DMG は 0x7E)
+        io.[0x04] <- 0xC7uy   // DIV (Timer.postBootCounter の上位バイトと一致させること)
+        io.[0x10] <- 0x93uy   // NR10
+        io.[0x26] <- 0xF0uy   // NR52 (APU 電源 off)
+        Array.fill io 0x30 16 0xFFuy  // 波形 RAM
         io.[0x46] <- 0x00uy   // DMA (DMG は 0xFF)
+        io.[0x48] <- 0xFFuy   // OBP0
+        io.[0x49] <- 0xFFuy   // OBP1
+        io.[0x4C] <- 0xFBuy   // KEY0
         io.[0x4D] <- 0x00uy   // KEY1: 通常速度 (bit7=0) / 未アーム (bit0=0)
-        io.[0x56] <- 0x3Euy   // RP (赤外線ポート)
-        io.[0x6C] <- 0x00uy   // OPRI: CGB 方式のオブジェクト優先度
+        io.[0x56] <- 0xFFuy   // RP (赤外線ポート)
+        io.[0x68] <- 0x40uy   // BCPS
+        io.[0x6A] <- 0x40uy   // OCPS
+        io.[0x6C] <- 0xFFuy   // OPRI
         io.[0x70] <- 0x00uy   // SVBK: 0 を書いた状態 (実効バンクは 1、読み出しは 0xF8)
-        io.[0x74] <- 0x00uy   // 未定義レジスタ (CGB モードでは 0x00 から読み書きできる)
+        io.[0x72] <- 0x00uy   // 未定義レジスタ
+        io.[0x73] <- 0x00uy
+        io.[0x74] <- 0x00uy
+        io.[0x75] <- 0x00uy
+        io.[0x76] <- 0x00uy
+        io.[0x77] <- 0x00uy
         io
     { mem with
         CgbMode = cgbMode
         VramBank = 0
         Io = io
+        // CGB のブート ROM は BG/OBJ パレットを白 (0xE7E7 = BGR555 の最大値) で埋めて終わる。
+        // 実測 (PyBoy, PC=0x0100 時点): BG / OBJ とも 64 バイトすべて 0xE7。
+        BgPalette = if cgbMode then Array.create 64 0xE7uy else mem.BgPalette
+        ObjPalette = if cgbMode then Array.create 64 0xE7uy else mem.ObjPalette
         Rom = Array.copy rom
         ExtRam = Array.zeroCreate ramSize
         Mbc =
