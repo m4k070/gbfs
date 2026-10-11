@@ -303,12 +303,12 @@ let ``シリアル転送は分周カウンタのエッジ 8 回で完了し SB=0
 
     let midway = step 0 3584 mem                        // 7 ビット分 (512 T × 7)
     Assert.Equal(1, midway.SerialBits)
-    Assert.Equal(0x81uy, Memory.read 0xFF02us midway)   // まだ転送中
+    Assert.Equal(0xFDuy, Memory.read 0xFF02us midway)   // まだ転送中 (bit7=1、bit2-6 は未使用で 1)
 
     let doneMem = step 3584 512 midway                  // 8 ビット目
     Assert.Equal(0, doneMem.SerialBits)
     Assert.Equal(0xFFuy, Memory.read 0xFF01us doneMem)  // SB: 相手なし
-    Assert.Equal(0x01uy, Memory.read 0xFF02us doneMem)  // bit7 クリア
+    Assert.Equal(0x7Duy, Memory.read 0xFF02us doneMem)  // bit7 クリア (0x01 | 未使用ビット 0x7C)
     Assert.Equal(0x08, int (Memory.read 0xFF0Fus doneMem) &&& 0x08)   // シリアル割込み
 
 [<Fact>]

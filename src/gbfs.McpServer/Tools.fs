@@ -39,15 +39,19 @@ type EmulatorTools() =
     static member load_rom([<Description("Absolute path to the .gb ROM file")>] path: string) : string =
         try
             let rom = File.ReadAllBytes(path)
-            EmulatorHolder.state <- Emulator.loadRomWithSave path (Emulator.create ())
+            // カートのヘッダ 0x0143 bit7 = 1 なら CGB マシンで起動する (CGB 専用カートは DMG では動かない)
+            let machine =
+                if rom.Length > 0x0143 && (rom.[0x0143] &&& 0x80uy) <> 0uy then Memory.Cgb
+                else Memory.Dmg
+            EmulatorHolder.state <- Emulator.loadRomWithSave path (Emulator.createWithMachine machine)
             EmulatorHolder.romPath <- Some path
             let savPath = Emulator.saveRamPath path
             let savNote =
                 if Emulator.hasBattery EmulatorHolder.state && File.Exists savPath then
                     sprintf " | restored %s" (Path.GetFileName savPath)
                 else ""
-            sprintf "ROM loaded: %s (%d bytes) | mapper %s%s%s"
-                (Path.GetFileName path) rom.Length
+            sprintf "ROM loaded: %s (%d bytes) | machine %s | mapper %s%s%s"
+                (Path.GetFileName path) rom.Length (Memory.machineName machine)
                 (Emulator.getMapperName EmulatorHolder.state)
                 (if Emulator.hasBattery EmulatorHolder.state then " +battery" else "")
                 savNote
@@ -104,6 +108,88 @@ type EmulatorTools() =
             let buttonStr = String.Join(", ", buttons)
             return sprintf "Pressed [%s] for %d frame(s). Frame: %d" buttonStr n EmulatorHolder.state.FrameCount
         }
+
+    [<McpServerTool>]
+    [<Description("Execute a batch of button presses in one call. Each step is \"buttons[:hold_frames[:wait_frames]]\" where buttons are joined with '+' (e.g. \"a:15:105\", \"down+start:10:60\"). Use 'repeat' to run the whole sequence N times (e.g. one step \"a:15:105\" with repeat=20 = 20 dialog advances in a single call). Returns the frames advanced and a screen hash, so the caller can tell whether the screen actually changed.")>]
+    static member press_sequence(
+        [<Description("Steps, e.g. [\"a:15:105\"; \"down:10:30\"]")>] steps: string array,
+        [<Description("Repeat the whole sequence this many times (default 1)")>] repeat: int) : Task<string> =
+        task {
+            let reps = if repeat <= 0 then 1 else repeat
+            let parsed =
+                steps
+                |> Array.map (fun s ->
+                    let parts = s.Split(':')
+                    let buttons = parts.[0].Split('+') |> Array.filter (fun b -> b <> "")
+                    let hold =
+                        if parts.Length > 1 then
+                            match Int32.TryParse parts.[1] with
+                            | true, v when v > 0 -> v
+                            | _ -> 1
+                        else 1
+                    let wait =
+                        if parts.Length > 2 then
+                            match Int32.TryParse parts.[2] with
+                            | true, v when v >= 0 -> v
+                            | _ -> 0
+                        else 0
+                    (buttons, hold, wait))
+            let mutable frames = 0
+            for _ in 1 .. reps do
+                for (buttons, hold, wait) in parsed do
+                    for b in buttons do
+                        EmulatorHolder.state <- Emulator.pressButton b EmulatorHolder.state
+                    EmulatorHolder.state <- Emulator.runFrames hold EmulatorHolder.state
+                    for b in buttons do
+                        EmulatorHolder.state <- Emulator.releaseButton b EmulatorHolder.state
+                    if wait > 0 then
+                        EmulatorHolder.state <- Emulator.runFrames wait EmulatorHolder.state
+                    frames <- frames + hold + wait
+            do! FrameRelay.postFrame()
+            let s = EmulatorHolder.state
+            let fb = Emulator.getFrameBuffer s
+            let nonBlank = fb |> Array.filter (fun v -> v <> 0uy) |> Array.length
+            let hash =
+                System.Security.Cryptography.SHA256.HashData(fb)
+                |> Convert.ToHexString
+                |> fun h -> h.Substring(0, 12)
+            return
+                sprintf "Executed %d step(s) x%d = %d frames. Frame: %d | screen hash: %s | non-blank pixels: %d"
+                    parsed.Length reps frames s.FrameCount hash nonBlank
+        }
+
+    [<McpServerTool>]
+    [<Description("Save the full emulator state to a JSON file (CPU, memory, PPU, APU, MBC, frame count). Restore it with load_state after loading the same ROM. Much faster than replaying the intro.")>]
+    static member save_state([<Description("Output path of the state file")>] path: string) : string =
+        try
+            let len = State.saveTo path EmulatorHolder.state
+            sprintf "Wrote %s (%d bytes JSON) at frame %d" (Path.GetFullPath path) len EmulatorHolder.state.FrameCount
+        with ex ->
+            sprintf "Error saving state: %s" ex.Message
+
+    [<McpServerTool>]
+    [<Description("Load an emulator state written by save_state. The same ROM must already be loaded (the ROM bytes are taken from the current state, they are not stored in the file).")>]
+    static member load_state([<Description("Path of the state file")>] path: string) : string =
+        try
+            EmulatorHolder.state <- State.loadFrom path EmulatorHolder.state
+            sprintf "Loaded %s at frame %d" (Path.GetFullPath path) EmulatorHolder.state.FrameCount
+        with ex ->
+            sprintf "Error loading state: %s" ex.Message
+
+    [<McpServerTool>]
+    [<Description("Write the current screen to a PNG file (160x144, 24bit RGB from the CGB palette RAM) and return its path. Use this when a vision-capable model needs to read the screen (menus, dialog text).")>]
+    static member screenshot_png([<Description("Output path of the PNG file")>] path: string) : string =
+        try
+            let rgb = Emulator.getRgbFrameBuffer EmulatorHolder.state
+            let png = Png.encodeRgb 160 144 rgb
+            let full = Path.GetFullPath path
+            let dir = Path.GetDirectoryName full
+            if not (String.IsNullOrEmpty dir) then
+                Directory.CreateDirectory dir |> ignore
+            File.WriteAllBytes(full, png)
+            sprintf "Wrote %s (%d bytes, 160x144 RGB) at frame %d" full png.Length EmulatorHolder.state.FrameCount
+        with ex ->
+            sprintf "Error writing screenshot: %s" ex.Message
 
     [<McpServerTool>]
     [<Description("Get the current screen as ASCII art (160x144)")>]

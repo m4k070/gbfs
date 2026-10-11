@@ -494,6 +494,9 @@ module Memory =
       let value = mem.Io.[a - 0xFF00]
       match a with
       | 0xFF14 | 0xFF19 | 0xFF1E | 0xFF23 -> value ||| 0x80uy
+      // 未使用ビットは 1 として読める (SC bit2-6 / TAC bit3-7。PyBoy と一致することを確認済み)
+      | 0xFF02 -> (value &&& 0x83uy) ||| 0x7Cuy   // SC
+      | 0xFF07 -> (value &&& 0x07uy) ||| 0xF8uy   // TAC
       // CGB 専用レジスタ。非 CGB モードでは 0xFF を読む (Pan Docs: CGB Registers)
       | 0xFF4C -> if mem.CgbMode then 0xFEuy else 0xFFuy                          // KEY0 (bit0 = DMG 互換モード = 0)
       | 0xFF4D -> if mem.CgbMode then 0x7Euy ||| (value &&& 0x81uy) else 0xFFuy   // KEY1 (bit7 = 倍速, bit0 = アーム)
