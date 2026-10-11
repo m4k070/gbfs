@@ -16,6 +16,7 @@
     <Compile Include="Decoder.fs" />
     <Compile Include="CpuCore.fs" />
     <Compile Include="WireLevelCpu.fs" />
+    <Compile Include="Png.fs" />
     <Compile Include="Emulator.fs" />
   </ItemGroup>
 
