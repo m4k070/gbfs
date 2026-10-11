@@ -71,6 +71,23 @@ module Png =
       chunk "IEND" [||]
     ]
 
+  /// 24bit RGB PNG (pixels は width * height * 3 バイト、R,G,B の順)
+  let encodeRgb (width: int) (height: int) (pixels: byte array) : byte array =
+    if pixels.Length < width * height * 3 then
+      invalidArg "pixels" (sprintf "ピクセル数が足りません (%d < %d)" pixels.Length (width * height * 3))
+    let ihdr =
+      Array.concat [ be32 (uint32 width); be32 (uint32 height); [| 8uy; 2uy; 0uy; 0uy; 0uy |] ]
+    let raw = Array.zeroCreate ((width * 3 + 1) * height)
+    for y in 0 .. height - 1 do
+      raw.[y * (width * 3 + 1)] <- 0uy // フィルタ: None
+      Array.blit pixels (y * width * 3) raw (y * (width * 3 + 1) + 1) (width * 3)
+    Array.concat [
+      [| 0x89uy; 0x50uy; 0x4Euy; 0x47uy; 0x0Duy; 0x0Auy; 0x1Auy; 0x0Auy |]
+      chunk "IHDR" ihdr
+      chunk "IDAT" (zlibStore raw)
+      chunk "IEND" [||]
+    ]
+
   /// gbfs の framebuffer (値 0-3 の 4 階調) をグレーに写して PNG にする。
   /// 写し方は Desktop UI と同じ (0 = 最も明るい)。
   let encodeFrameBuffer (width: int) (height: int) (frameBuffer: byte array) : byte array =

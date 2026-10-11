@@ -159,17 +159,35 @@ type EmulatorTools() =
         }
 
     [<McpServerTool>]
-    [<Description("Write the current screen to a PNG file (160x144, grayscale) and return its path. Use this when a vision-capable model needs to read the screen (menus, dialog text).")>]
+    [<Description("Save the full emulator state to a JSON file (CPU, memory, PPU, APU, MBC, frame count). Restore it with load_state after loading the same ROM. Much faster than replaying the intro.")>]
+    static member save_state([<Description("Output path of the state file")>] path: string) : string =
+        try
+            let len = State.saveTo path EmulatorHolder.state
+            sprintf "Wrote %s (%d bytes JSON) at frame %d" (Path.GetFullPath path) len EmulatorHolder.state.FrameCount
+        with ex ->
+            sprintf "Error saving state: %s" ex.Message
+
+    [<McpServerTool>]
+    [<Description("Load an emulator state written by save_state. The same ROM must already be loaded (the ROM bytes are taken from the current state, they are not stored in the file).")>]
+    static member load_state([<Description("Path of the state file")>] path: string) : string =
+        try
+            EmulatorHolder.state <- State.loadFrom path EmulatorHolder.state
+            sprintf "Loaded %s at frame %d" (Path.GetFullPath path) EmulatorHolder.state.FrameCount
+        with ex ->
+            sprintf "Error loading state: %s" ex.Message
+
+    [<McpServerTool>]
+    [<Description("Write the current screen to a PNG file (160x144, 24bit RGB from the CGB palette RAM) and return its path. Use this when a vision-capable model needs to read the screen (menus, dialog text).")>]
     static member screenshot_png([<Description("Output path of the PNG file")>] path: string) : string =
         try
-            let fb = Emulator.getFrameBuffer EmulatorHolder.state
-            let png = Png.encodeFrameBuffer 160 144 fb
+            let rgb = Emulator.getRgbFrameBuffer EmulatorHolder.state
+            let png = Png.encodeRgb 160 144 rgb
             let full = Path.GetFullPath path
             let dir = Path.GetDirectoryName full
             if not (String.IsNullOrEmpty dir) then
                 Directory.CreateDirectory dir |> ignore
             File.WriteAllBytes(full, png)
-            sprintf "Wrote %s (%d bytes, 160x144 grayscale) at frame %d" full png.Length EmulatorHolder.state.FrameCount
+            sprintf "Wrote %s (%d bytes, 160x144 RGB) at frame %d" full png.Length EmulatorHolder.state.FrameCount
         with ex ->
             sprintf "Error writing screenshot: %s" ex.Message
 

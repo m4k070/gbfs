@@ -74,6 +74,25 @@ let ``framebuffer の 4 階調は明→暗のグレーに写る`` () =
     Assert.Equal<byte array>([| 0uy; 0xFFuy; 0xAAuy; 0x55uy; 0x00uy |], raw)
 
 [<Fact>]
+let ``RGB PNG は color type 2 で R,G,B をそのまま書く`` () =
+    let pixels = [| 0x11uy; 0x22uy; 0x33uy; 0x44uy; 0x55uy; 0x66uy |] // 2x1
+    let png = Png.encodeRgb 2 1 pixels
+    let cs = chunks png
+    Assert.Equal(2uy, (snd cs.[0]).[9]) // color type: truecolor
+    let raw = inflate (snd cs.[1])
+    Assert.Equal<byte array>([| 0uy; 0x11uy; 0x22uy; 0x33uy; 0x44uy; 0x55uy; 0x66uy |], raw)
+
+[<Fact>]
+let ``RGB でも無圧縮ブロックを分割して書く`` () =
+    let pixels = Array.init (160 * 144 * 3) (fun i -> byte (i % 253))
+    let png = Png.encodeRgb 160 144 pixels
+    let raw = inflate (snd (chunks png).[1])
+    Assert.Equal((160 * 3 + 1) * 144, raw.Length)
+    for y in [ 0; 50; 143 ] do
+        Assert.Equal(0uy, raw.[y * 481])
+        Assert.Equal(byte ((y * 480) % 253), raw.[y * 481 + 1])
+
+[<Fact>]
 let ``ピクセル数が足りないと例外`` () =
     Assert.Throws<ArgumentException>(fun () -> Png.encodeGray 4 4 [| 1uy; 2uy |] |> ignore)
         |> ignore

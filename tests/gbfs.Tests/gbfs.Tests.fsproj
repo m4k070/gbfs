@@ -14,6 +14,7 @@
     <Compile Include="MachineModeTests.fs" />
     <Compile Include="HdmaTests.fs" />
     <Compile Include="PngTests.fs" />
+    <Compile Include="StateTests.fs" />
     <Compile Include="DecoderTests.fs" />
     <Compile Include="UnimplementedInstructionTests.fs" />
     <Compile Include="CBPrefixTests.fs" />
