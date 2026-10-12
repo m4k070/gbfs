@@ -536,3 +536,53 @@ module HaltBugTests =
         Assert.Equal(0x0040us, dispatched.Regs.PC)
         let returnAddr = uint16 (read 0xFFFCus dispatched.Mem) ||| (uint16 (read 0xFFFDus dispatched.Mem) <<< 8)
         Assert.Equal(0x0101us, returnAddr)
+
+/// OAM DMA ($FF46) のサイクル計上。
+/// 実機は DMA 転送に 640 T サイクルかかり、その間 CPU は停止するが
+/// PPU/APU/Timer はそのまま動き続ける。以前は PPU のサイクルから 160 を引いて
+/// CPU を走らせ続けており、毎フレーム 160 サイクル余分に走っていた
+/// (その結果ゲーム内時間が進みすぎ、扉でスクリプト分岐が壊れた)。
+module OamDmaStallTests =
+    open Xunit
+    open gbfs.Lib.Cpu
+    open gbfs.Lib.Decoder
+    open gbfs.Lib.Memory
+
+    [<Fact>]
+    let ``OAM DMA で CPU が 640 T サイクル停止する`` () =
+        let state = createState()
+        // 0xFF46 への書き込みで DMA 要求が立つ
+        let state = { state with Mem = write 0xFF46us 0xC0uy state.Mem }
+        Assert.True(state.Mem.DmaRequest, "0xFF46 への書き込みで DMA 要求が立つこと")
+
+        let pcBefore = state.Regs.PC
+        let mutable s = state
+        let mutable cycles = 0
+        // 1 step = 4 T サイクルなので 160 step で 640 T サイクル
+        for _ in 1 .. 160 do
+            let (ns, c) = stepWithCycles s
+            s <- ns
+            cycles <- cycles + c
+
+        Assert.Equal(640, cycles)
+        Assert.Equal(0, s.DmaStall)
+        // 停止中は命令を実行しないので PC は進まない
+        Assert.Equal(pcBefore, s.Regs.PC)
+
+        // 次の step から命令実行が再開する (PC が進む)
+        let (after, _) = stepWithCycles s
+        Assert.Equal(0, after.DmaStall)
+        Assert.NotEqual(pcBefore, after.Regs.PC)
+
+    [<Fact>]
+    let ``OAM DMA の転送は開始時に完了する`` () =
+        let state = createState()
+        // 0xC000 から 160 バイトを OAM へ転送する
+        let state = { state with Mem = write 0xC000us 0xABuy state.Mem }
+        let state = { state with Mem = write 0xFF46us 0xC0uy state.Mem }
+
+        let (afterFirst, _) = stepWithCycles state
+
+        // 要求は消費され、転送は最初の step で完了している
+        Assert.False(afterFirst.Mem.DmaRequest)
+        Assert.Equal(0xABuy, read 0xFE00us afterFirst.Mem)
