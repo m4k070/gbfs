@@ -70,16 +70,18 @@ let ``GDMA は bit7 = 0 の書き込みで即座に全ブロックを転送す�
     Assert.Equal(0xFFuy, Memory.read 0xFF55us mem)
 
 [<Fact>]
-let ``GDMA は転送先アドレスと転送元アドレスを進める`` () =
+let ``GDMA 完了後は HDMA1-4 が $FF になる`` () =
     let st = cgbState ()
     let mem = fillWram 0xC000us 32 st.Mem
     let mem = setAddresses 0xC000us 0x9000us mem
     let mem = Memory.write 0xFF55us 0x01uy mem
 
-    Assert.Equal(0xC0uy, Memory.read 0xFF51us mem)
-    Assert.Equal(0x20uy, Memory.read 0xFF52us mem) // +32 バイト
-    Assert.Equal(0x10uy, Memory.read 0xFF53us mem)
-    Assert.Equal(0x20uy, Memory.read 0xFF54us mem)
+    // 転送は完了しており (VRAM に書かれている)、完了後はアドレスレジスタが $FF になる。
+    // Pan Docs: 「中止時は HDMA1-4 が $FF にならない」= 完了時は $FF。PyBoy 実測も同じ。
+    Assert.Equal(0xFFuy, Memory.read 0xFF51us mem)
+    Assert.Equal(0xFFuy, Memory.read 0xFF52us mem)
+    Assert.Equal(0xFFuy, Memory.read 0xFF53us mem)
+    Assert.Equal(0xFFuy, Memory.read 0xFF54us mem)
 
 [<Fact>]
 let ``HDMA は HBlank ごとに 16 バイト転送し、残りを HDMA5 に反映する`` () =

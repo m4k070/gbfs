@@ -597,6 +597,12 @@ module Memory =
     for _ in 1 .. blocks do
       m <- hdmaTransferBlock m
     m.Io.[0x55] <- 0xFFuy // 完了 (bit7 = 1 = 非アクティブ, 残り = 0x7F)
+    // Pan Docs: 「中止時は HDMA1-4 が $FF にならない」= 完了時は $FF になる。
+    // PyBoy 実測でも、転送完了後は FF51-FF54 がすべて 0xFF を返す。
+    m.Io.[0x51] <- 0xFFuy
+    m.Io.[0x52] <- 0xFFuy
+    m.Io.[0x53] <- 0xFFuy
+    m.Io.[0x54] <- 0xFFuy
     m
 
   /// HDMA の 1 ライン分 (16 バイト) を転送する。HBlank 開始時に PPU から呼ばれる。
@@ -609,6 +615,11 @@ module Memory =
       let remaining = int (m.Io.[0x55] &&& 0x7Fuy)
       if remaining = 0 then
         m.Io.[0x55] <- 0xFFuy
+        // 完了時は HDMA1-4 も $FF になる (Pan Docs / PyBoy 実測)
+        m.Io.[0x51] <- 0xFFuy
+        m.Io.[0x52] <- 0xFFuy
+        m.Io.[0x53] <- 0xFFuy
+        m.Io.[0x54] <- 0xFFuy
         m
       else
         m.Io.[0x55] <- byte (remaining - 1)

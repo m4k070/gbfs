@@ -53,3 +53,19 @@ let ``BCPS の自動インクリメントビット (bit7) とインデックス 
 let ``OCPS も bit6 が 1 として読める`` () =
     let s = Emulator.writeMemory 0xFF6Aus [| 0xB2uy |] (cgbBoot ())
     Assert.Equal(0xF2uy, (Emulator.readMemory 0xFF6Aus 1 s).[0])
+
+/// Pan Docs: 「中止時は HDMA1-4 が $FF にならない」= 完了時は $FF になる。
+/// PyBoy 実測: GDMA 完了後は FF51-FF54 がすべて 0xFF。
+[<Fact>]
+let ``GDMA 完了後は HDMA1-4 が 0xFF を返す`` () =
+    let mutable s = cgbBoot ()
+    s <- Emulator.writeMemory 0xFF51us [| 0x01uy |] s
+    s <- Emulator.writeMemory 0xFF52us [| 0x00uy |] s
+    s <- Emulator.writeMemory 0xFF53us [| 0x80uy |] s
+    s <- Emulator.writeMemory 0xFF54us [| 0x00uy |] s
+    s <- Emulator.writeMemory 0xFF55us [| 0x00uy |] s // GDMA 1 ブロック = 即時完了
+    Assert.Equal(0x7Fuy, (Emulator.readMemory 0xFF55us 1 s).[0] &&& 0x7Fuy) // 完了時は残り 0x7F
+    Assert.Equal(0xFFuy, (Emulator.readMemory 0xFF51us 1 s).[0])
+    Assert.Equal(0xFFuy, (Emulator.readMemory 0xFF52us 1 s).[0])
+    Assert.Equal(0xFFuy, (Emulator.readMemory 0xFF53us 1 s).[0])
+    Assert.Equal(0xFFuy, (Emulator.readMemory 0xFF54us 1 s).[0])
