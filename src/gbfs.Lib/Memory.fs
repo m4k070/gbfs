@@ -526,6 +526,8 @@ module Memory =
       | 0xFF74 -> if mem.CgbMode then value else 0xFFuy                           // 未定義 (CGB モードでは読み書き可)
       | 0xFF75 -> (value &&& 0x70uy) ||| 0x8Fuy                                   // 未定義 (bit4-6 のみ読み書き可)
       // CGB のパレット RAM。非 CGB モードではレジスタ値 (起動値) をそのまま返す
+      // BCPS/OCPS ($FF68/$FF6A) の bit6 は未使用で、読み出すと常に 1 (PyBoy 実測: 0x80 書き込み → 0xC0 読み出し)
+      | 0xFF68 | 0xFF6A -> if mem.CgbMode then (value &&& 0xBFuy) ||| 0x40uy else value
       | 0xFF69 -> if mem.CgbMode then mem.BgPalette.[int (mem.Io.[0x68] &&& 0x3Fuy)] else value
       | 0xFF6B -> if mem.CgbMode then mem.ObjPalette.[int (mem.Io.[0x6A] &&& 0x3Fuy)] else value
       | _ -> value

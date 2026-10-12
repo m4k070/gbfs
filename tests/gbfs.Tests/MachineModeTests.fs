@@ -454,8 +454,9 @@ let ``CGB パレットは BCPS の自動インクリメントで連続書き込�
     for c in colors do
         mem <- Memory.write 0xFF69us (byte (c &&& 0xFFus)) mem
         mem <- Memory.write 0xFF69us (byte (c >>> 8)) mem
-    // 8 バイト書いたのでインデックスは 8 に進む
-    Assert.Equal(0x88uy, Memory.read 0xFF68us mem)
+    // 8 バイト書いたのでインデックスは 8 に進む。
+    // 読み出しは bit6 が常に 1 (PyBoy 実測) なので 0x88 | 0x40 = 0xC8
+    Assert.Equal(0xC8uy, Memory.read 0xFF68us mem)
     Assert.Equal(0x001Fus, Memory.bgPaletteColor 0 0 mem)
     Assert.Equal(0x03E0us, Memory.bgPaletteColor 0 1 mem)
     Assert.Equal(0x7C00us, Memory.bgPaletteColor 0 2 mem)
