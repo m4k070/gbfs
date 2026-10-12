@@ -253,12 +253,14 @@ let ``CGB モードの起動時レジスタは Pan Docs の CGB 列に一致す�
     Assert.Equal(0x000Dus, st.Regs.HL)                       // HL = 0x000D
 
 [<Fact>]
-let ``CGB モードの I/O 起動値は Pan Docs の CGB 列に一致する`` () =
+let ``CGB モードの I/O 起動値は実測 (PyBoy のブート ROM 完了時点) に一致する`` () =
     let st = cgbState (makeCgbRom ())
-    Assert.Equal(0xCFuy, Memory.read 0xFF00us st.Mem)   // P1
-    Assert.Equal(0x7Fuy, Memory.read 0xFF02us st.Mem)   // SC
+    // 期待値は PyBoy でクリスタル JP を起動し PC が 0x0100 に達した瞬間の実測値。
+    // gbfs はブート ROM を実行しないため、その完了時点の値を直接作る。
+    Assert.Equal(0x00uy, Memory.read 0xFF00us st.Mem)   // P1
+    Assert.Equal(0x7Cuy, Memory.read 0xFF02us st.Mem)   // SC
     Assert.Equal(0x00uy, Memory.read 0xFF46us st.Mem)   // DMA
-    Assert.Equal(0x3Euy, Memory.read 0xFF56us st.Mem)   // RP
+    Assert.Equal(0xFFuy, Memory.read 0xFF56us st.Mem)   // RP
     Assert.Equal(0x7Euy, Memory.read 0xFF4Dus st.Mem)   // KEY1
     Assert.Equal(0xFEuy, Memory.read 0xFF4Fus st.Mem)   // VBK
     Assert.Equal(0xF8uy, Memory.read 0xFF70us st.Mem)   // SVBK
@@ -452,8 +454,9 @@ let ``CGB パレットは BCPS の自動インクリメントで連続書き込�
     for c in colors do
         mem <- Memory.write 0xFF69us (byte (c &&& 0xFFus)) mem
         mem <- Memory.write 0xFF69us (byte (c >>> 8)) mem
-    // 8 バイト書いたのでインデックスは 8 に進む
-    Assert.Equal(0x88uy, Memory.read 0xFF68us mem)
+    // 8 バイト書いたのでインデックスは 8 に進む。
+    // 読み出しは bit6 が常に 1 (PyBoy 実測) なので 0x88 | 0x40 = 0xC8
+    Assert.Equal(0xC8uy, Memory.read 0xFF68us mem)
     Assert.Equal(0x001Fus, Memory.bgPaletteColor 0 0 mem)
     Assert.Equal(0x03E0us, Memory.bgPaletteColor 0 1 mem)
     Assert.Equal(0x7C00us, Memory.bgPaletteColor 0 2 mem)

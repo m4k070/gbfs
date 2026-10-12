@@ -313,25 +313,45 @@ module Memory =
     let io =
       if not cgbMode then mem.Io
       else
-        // CGB モードの起動値。ブート ROM が書き込む値なので検証 ROM が無い (未検証)。
-        // 非 CGB モード側の値は mooneye misc/boot_hwio-C で検証済み。
+        // CGB モードの起動値 (ブート ROM 完了時点 = PC 0x0100)。
+        // ブート ROM を実行しないので、その完了時点の値を直接作る。
+        // 出典: PyBoy (ブート ROM を実行する参照実装) でクリスタル JP を起動し、
+        //       PC が 0x0100 に達した瞬間の 0xFF00-0xFF7F を実測した値。
+        //       非 CGB (DMG 互換) 側の値は mooneye misc/boot_hwio-C で検証済みで、
+        //       こちらは変更しない。
         let io = Array.copy mem.Io
-        // Pan Docs "Power-Up Sequence" の CGB 列 (CGB モードの値)。
-        // 非 CGB モード (DMG 互換) の値は mooneye misc/boot_hwio-C で検証済みだが、
-        // CGB モード側はブート ROM が書く値で検証 ROM が無い
-        io.[0x00] <- 0xCFuy   // P1: 0xCF (モデルによっては 0xC7)
-        io.[0x02] <- 0x7Fuy   // SC (DMG は 0x7E)
+        io.[0x00] <- 0x00uy   // P1  (両ボタン群を選択したまま終わる)
+        io.[0x01] <- 0xFFuy   // SB
+        io.[0x02] <- 0x7Cuy   // SC  (DMG は 0x7E)
+        io.[0x04] <- 0xC7uy   // DIV (Timer.postBootCounter の上位バイトと一致させること)
+        io.[0x10] <- 0x93uy   // NR10
+        io.[0x26] <- 0xF0uy   // NR52 (APU 電源 off)
+        Array.fill io 0x30 16 0xFFuy  // 波形 RAM
         io.[0x46] <- 0x00uy   // DMA (DMG は 0xFF)
+        io.[0x48] <- 0xFFuy   // OBP0
+        io.[0x49] <- 0xFFuy   // OBP1
+        io.[0x4C] <- 0xFBuy   // KEY0
         io.[0x4D] <- 0x00uy   // KEY1: 通常速度 (bit7=0) / 未アーム (bit0=0)
-        io.[0x56] <- 0x3Euy   // RP (赤外線ポート)
-        io.[0x6C] <- 0x00uy   // OPRI: CGB 方式のオブジェクト優先度
+        io.[0x56] <- 0xFFuy   // RP (赤外線ポート)
+        io.[0x68] <- 0x40uy   // BCPS
+        io.[0x6A] <- 0x40uy   // OCPS
+        io.[0x6C] <- 0xFFuy   // OPRI
         io.[0x70] <- 0x00uy   // SVBK: 0 を書いた状態 (実効バンクは 1、読み出しは 0xF8)
-        io.[0x74] <- 0x00uy   // 未定義レジスタ (CGB モードでは 0x00 から読み書きできる)
+        io.[0x72] <- 0x00uy   // 未定義レジスタ
+        io.[0x73] <- 0x00uy
+        io.[0x74] <- 0x00uy
+        io.[0x75] <- 0x00uy
+        io.[0x76] <- 0x00uy
+        io.[0x77] <- 0x00uy
         io
     { mem with
         CgbMode = cgbMode
         VramBank = 0
         Io = io
+        // CGB のブート ROM は BG/OBJ パレットを白 (0xE7E7 = BGR555 の最大値) で埋めて終わる。
+        // 実測 (PyBoy, PC=0x0100 時点): BG / OBJ とも 64 バイトすべて 0xE7。
+        BgPalette = if cgbMode then Array.create 64 0xE7uy else mem.BgPalette
+        ObjPalette = if cgbMode then Array.create 64 0xE7uy else mem.ObjPalette
         Rom = Array.copy rom
         ExtRam = Array.zeroCreate ramSize
         Mbc =
@@ -506,6 +526,8 @@ module Memory =
       | 0xFF74 -> if mem.CgbMode then value else 0xFFuy                           // 未定義 (CGB モードでは読み書き可)
       | 0xFF75 -> (value &&& 0x70uy) ||| 0x8Fuy                                   // 未定義 (bit4-6 のみ読み書き可)
       // CGB のパレット RAM。非 CGB モードではレジスタ値 (起動値) をそのまま返す
+      // BCPS/OCPS ($FF68/$FF6A) の bit6 は未使用で、読み出すと常に 1 (PyBoy 実測: 0x80 書き込み → 0xC0 読み出し)
+      | 0xFF68 | 0xFF6A -> if mem.CgbMode then (value &&& 0xBFuy) ||| 0x40uy else value
       | 0xFF69 -> if mem.CgbMode then mem.BgPalette.[int (mem.Io.[0x68] &&& 0x3Fuy)] else value
       | 0xFF6B -> if mem.CgbMode then mem.ObjPalette.[int (mem.Io.[0x6A] &&& 0x3Fuy)] else value
       | _ -> value
@@ -575,6 +597,12 @@ module Memory =
     for _ in 1 .. blocks do
       m <- hdmaTransferBlock m
     m.Io.[0x55] <- 0xFFuy // 完了 (bit7 = 1 = 非アクティブ, 残り = 0x7F)
+    // Pan Docs: 「中止時は HDMA1-4 が $FF にならない」= 完了時は $FF になる。
+    // PyBoy 実測でも、転送完了後は FF51-FF54 がすべて 0xFF を返す。
+    m.Io.[0x51] <- 0xFFuy
+    m.Io.[0x52] <- 0xFFuy
+    m.Io.[0x53] <- 0xFFuy
+    m.Io.[0x54] <- 0xFFuy
     m
 
   /// HDMA の 1 ライン分 (16 バイト) を転送する。HBlank 開始時に PPU から呼ばれる。
@@ -587,6 +615,11 @@ module Memory =
       let remaining = int (m.Io.[0x55] &&& 0x7Fuy)
       if remaining = 0 then
         m.Io.[0x55] <- 0xFFuy
+        // 完了時は HDMA1-4 も $FF になる (Pan Docs / PyBoy 実測)
+        m.Io.[0x51] <- 0xFFuy
+        m.Io.[0x52] <- 0xFFuy
+        m.Io.[0x53] <- 0xFFuy
+        m.Io.[0x54] <- 0xFFuy
         m
       else
         m.Io.[0x55] <- byte (remaining - 1)
@@ -710,12 +743,19 @@ module Memory =
       | 0xFF51 | 0xFF52 | 0xFF53 | 0xFF54 -> // HDMA1-4: 転送元/転送先アドレス (CGB 専用)
         if mem.CgbMode then mem.Io.[a - 0xFF00] <- value
         mem
-      | 0xFF55 -> // HDMA5: bit7 = 0 → GDMA (即時転送) / bit7 = 1 → HDMA (1 ラインずつ)
+      | 0xFF55 -> // HDMA5: bit7 = 0 → GDMA (即時転送) / 1 → HDMA (1 ラインずつ)
         if not mem.CgbMode then
           mem
         elif (value &&& 0x80uy) <> 0uy then
           // bit7 = 0 にして「転送中」を表す (読み出しで bit7 = 0 = 進行中)
           mem.Io.[0x55] <- value &&& 0x7Fuy
+          mem
+        elif hdmaActive mem then
+          // 転送中に bit7 = 0 を書いた場合は「手動終了 (中断)」。
+          // Pan Docs: bit7 を 0 にした書き込みは HBlank 転送を停止する。
+          // ここで GDMA を走らせてはいけない (余分なブロックを VRAM に書いてしまう)。
+          // 残りブロック数 (bit0-6) はそのままに、bit7 = 1 (非アクティブ) にする。
+          mem.Io.[0x55] <- mem.Io.[0x55] ||| 0x80uy
           mem
         else
           gdmaTransfer ((int value &&& 0x7F) + 1) mem

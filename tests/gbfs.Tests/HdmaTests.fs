@@ -33,6 +33,30 @@ let private fillWram (addr: uint16) (n: int) (mem: Memory.MemoryBus) =
     m
 
 [<Fact>]
+let ``転送中に bit7 = 0 を書くと中断され、残りブロック数が読める`` () =
+    // Pan Docs: bit7 を 0 にした書き込みは HBlank 転送を停止する (手動終了)。
+    // 転送は行わず、bit7 = 1 (非アクティブ) + 残りのブロック数が読める。
+    let st = cgbState ()
+    let mem = fillWram 0xC000us 96 st.Mem
+    let mem = setAddresses 0xC000us 0x9000us mem
+    let mem = Memory.write 0xFF55us 0x85uy mem // 6 ブロックの HDMA を開始
+
+    Assert.Equal(0x05uy, Memory.read 0xFF55us mem) // 進行中 (bit7 = 0)
+
+    let mem = Memory.write 0xFF55us 0x00uy mem // 中断 (bit7 = 0 の書き込み)
+
+    Assert.Equal(0x85uy, Memory.read 0xFF55us mem) // bit7 = 1 + 残り 5 (あと 6 ブロック)
+
+    // 中断時に余分なブロックを転送してはいけない
+    for i in 0 .. 15 do
+        Assert.Equal(0uy, Memory.readVram 0 (0x9000 - 0x8000 + i) mem)
+
+    // 中断後は HBlank でも転送されない
+    let mem2 = Memory.hdmaStep mem
+    for i in 0 .. 15 do
+        Assert.Equal(0uy, Memory.readVram 0 (0x9000 - 0x8000 + i) mem2)
+
+[<Fact>]
 let ``GDMA は bit7 = 0 の書き込みで即座に全ブロックを転送する`` () =
     let st = cgbState ()
     let mem = fillWram 0xC000us 32 st.Mem
@@ -46,16 +70,18 @@ let ``GDMA は bit7 = 0 の書き込みで即座に全ブロックを転送す�
     Assert.Equal(0xFFuy, Memory.read 0xFF55us mem)
 
 [<Fact>]
-let ``GDMA は転送先アドレスと転送元アドレスを進める`` () =
+let ``GDMA 完了後は HDMA1-4 が $FF になる`` () =
     let st = cgbState ()
     let mem = fillWram 0xC000us 32 st.Mem
     let mem = setAddresses 0xC000us 0x9000us mem
     let mem = Memory.write 0xFF55us 0x01uy mem
 
-    Assert.Equal(0xC0uy, Memory.read 0xFF51us mem)
-    Assert.Equal(0x20uy, Memory.read 0xFF52us mem) // +32 バイト
-    Assert.Equal(0x10uy, Memory.read 0xFF53us mem)
-    Assert.Equal(0x20uy, Memory.read 0xFF54us mem)
+    // 転送は完了しており (VRAM に書かれている)、完了後はアドレスレジスタが $FF になる。
+    // Pan Docs: 「中止時は HDMA1-4 が $FF にならない」= 完了時は $FF。PyBoy 実測も同じ。
+    Assert.Equal(0xFFuy, Memory.read 0xFF51us mem)
+    Assert.Equal(0xFFuy, Memory.read 0xFF52us mem)
+    Assert.Equal(0xFFuy, Memory.read 0xFF53us mem)
+    Assert.Equal(0xFFuy, Memory.read 0xFF54us mem)
 
 [<Fact>]
 let ``HDMA は HBlank ごとに 16 バイト転送し、残りを HDMA5 に反映する`` () =
