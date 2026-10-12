@@ -254,6 +254,11 @@ module Decoder =
     /// STOP で速度を切り替えた後の CPU 停止の残り T サイクル
     /// (Pan Docs: 2050 M サイクル = 8200 T サイクル)。0 のとき実行中
     Stopped: int
+    /// OAM DMA 中の CPU 停止の残り T サイクル。実機は DMA 転送に 640 T サイクルかかり、
+    /// その間 CPU は停止するが PPU/APU/Timer はそのまま動き続ける (160 M サイクル = 640 T サイクル)。
+    /// 0 のとき実行中。以前は PPU 側で「160 を引く」実装になっており、CPU が毎フレーム
+    /// 160 サイクル余分に走っていた (実測: 1 フレーム 70,384 サイクル / 実機 70,224)。
+    DmaStall: int
   }
 
   /// マシン種別 (DMG / CGB) を指定して起動状態を作る
@@ -272,6 +277,7 @@ module Decoder =
     Halted = false
     HaltBug = false
     Stopped = 0
+    DmaStall = 0
   }
 
   /// DMG マシン (既定) の起動状態
@@ -1002,6 +1008,22 @@ module Decoder =
   /// 戻り値は (新しい状態, この step で周辺回路を進めたサイクル数 (T サイクル))。
   /// テスト ROM ランナー等、経過サイクルを数えたい呼び出し元向け
   let stepWithCycles (state: CpuState) : CpuState * int =
+    // OAM DMA: 0xFF46 への書き込みで要求が立つ。実機は 640 T サイクルの間 CPU が停止するが、
+    // PPU/APU/Timer はそのまま動き続ける。転送自体は開始時に済ませ、以降は停止だけする。
+    if state.Mem.DmaRequest then
+      let dmaValue = Memory.read 0xFF46us state.Mem
+      let memAfterDma = Ppu.dmaTransfer dmaValue state.Mem
+      memAfterDma.Io.[int (0xFF46us - 0xFF00us)] <- 0uy
+      let memAfterDma = { memAfterDma with DmaRequest = false }
+      let cycles = 4
+      let s = { state with Mem = memAfterDma; DmaStall = 640 - cycles }
+      (stepPeripherals cycles s, cycles)
+    // OAM DMA による CPU 停止中: 命令を実行せず、周辺回路だけ進める
+    elif state.DmaStall > 0 then
+      let cycles = min 4 state.DmaStall
+      let s = { state with DmaStall = state.DmaStall - cycles }
+      (stepPeripherals cycles s, cycles)
+    else
     // First, check for pending interrupts
     let pending = getPendingInterrupts state
 

@@ -103,6 +103,11 @@ module Ppu =
         Mode: PpuMode
         Cycles: int
         LY: byte // Current scanline (0-153)
+        /// 前回のステップで STAT 割り込み線が立っていたか。
+        /// 実機の STAT 割り込みは「有効な条件の OR」が 0→1 になった瞬間に要求が上がる。
+        /// モード遷移だけで判定すると、ゲームが $FF41 を書いて条件が成立した場合
+        /// (実機は書き込みでも割り込みが上がる) を取り逃す。実測で 3.1/フレームの欠落になっていた。
+        StatLine: bool
         FrameBuffer: byte array // 160 * 144 pixels, 4 shades of gray
         /// 実際の色を入れた RGB バッファ (160 * 144 * 3 バイト、R,G,B の順)。
         /// CGB はパレット RAM の RGB555 を 8 ビットに伸ばした値、DMG は 4 階調を緑系パレットに写した値。
@@ -119,6 +124,7 @@ module Ppu =
         Mode = OamScan
         Cycles = 0
         LY = 0uy
+        StatLine = false
         FrameBuffer = Array.zeroCreate (160 * 144)
         RgbFrameBuffer = Array.zeroCreate (160 * 144 * 3)
         BgColorIndex = Array.zeroCreate (160 * 144)
@@ -402,7 +408,7 @@ module Ppu =
 
     /// Initiates an OAM DMA transfer.
     /// Copies 160 bytes from `sourceAddr` to OAM (0xFE00-0xFE9F).
-    let private dmaTransfer (sourceAddr: byte) (mem: Memory.MemoryBus) : Memory.MemoryBus =
+    let dmaTransfer (sourceAddr: byte) (mem: Memory.MemoryBus) : Memory.MemoryBus =
         let start = uint16 sourceAddr <<< 8 // Source address is sourceAddr * 0x100
         let mutable newMem = mem
         for i in 0 .. OAM_SPRITE_COUNT * OAM_ENTRY_SIZE - 1 do // 160 bytes
@@ -415,30 +421,15 @@ module Ppu =
     let step (cycles: int) (ppuState: PpuState) (mem: Memory.MemoryBus) : PpuState * Memory.MemoryBus =
         let mutable newPpuState = ppuState
         let mutable newMem = mem
-        let mutable remainingCycles = cycles
-
-        // Handle DMA transfer if initiated (0xFF46 への書き込みがあったときだけ)
-        if newMem.DmaRequest then
-            let dmaValue = Memory.read DMA newMem
-            newMem <- dmaTransfer dmaValue newMem
-            // 転送後は 0xFF46 が 0x00 になる (Memory.write 経由だと再び要求が立つため直接書く)
-            newMem.Io.[int (DMA - 0xFF00us)] <- 0uy
-            newMem <- { newMem with DmaRequest = false }
-            // DMA takes 160 cycles. Subtract from current cycles.
-            remainingCycles <- remainingCycles - 160 // Or more accurately, 640 T-cycles / 4 T-cycles per machine cycle = 160 machine cycles.
+        // OAM DMA (0xFF46) は Decoder 側で扱う: 実機は 640 T サイクルの間 CPU が停止し、
+        // PPU はそのまま動き続ける。PPU のサイクルから差し引いてはいけない。
+        let remainingCycles = cycles
 
         newPpuState <- { newPpuState with Cycles = newPpuState.Cycles + remainingCycles }
 
         // Read current STAT and LYC
         let currentStat = Memory.read STAT newMem
         let lyc = Memory.read LYC newMem
-
-        // Store the old PPU mode for interrupt checking
-        let oldPpuMode = newPpuState.Mode
-
-        // Update LYC=LY Flag (Bit 2 of STAT)
-        let lycEqLy = (newPpuState.LY = lyc)
-        let statWithLycFlag = if lycEqLy then (currentStat ||| 0x04uy) else (currentStat &&& (0xFFuy - 0x04uy))
 
         // Process PPU modes and update newPpuState, newMem
         match newPpuState.Mode with
@@ -476,6 +467,13 @@ module Ppu =
                 if newPpuState.LY > 153uy then
                     newPpuState <- { newPpuState with Mode = OamScan; LY = 0uy }
 
+        // Update LYC=LY Flag (Bit 2 of STAT)
+        // LY はモードマシンで進んだあとの値で判定する。モードマシンより前に判定すると
+        // ゲームが読む STAT の LYC ビットが 1 ステップ古くなる (ハードウェアでは LY 加算の
+        // 直後に一致フラグが更新され、ゲームのポーリング値と食い違う)。
+        let lycEqLy = (newPpuState.LY = lyc)
+        let statWithLycFlag = if lycEqLy then (currentStat ||| 0x04uy) else (currentStat &&& (0xFFuy - 0x04uy))
+
         // Update STAT register with new mode bits (bits 0-1)
         let newStatModeBits =
             match newPpuState.Mode with
@@ -486,22 +484,21 @@ module Ppu =
         let finalStat = (statWithLycFlag &&& 0xFCuy) ||| newStatModeBits // Clear old mode bits, set new ones
         newMem <- Memory.write STAT finalStat newMem
 
-        // Check for STAT interrupts *after* mode transition (if applicable) and LYC comparison
-        // LYC=LY interrupt
-        if lycEqLy && ((currentStat &&& 0x40uy) <> 0uy) then // Use currentStat for enable bit
-            newMem <- Memory.requestInterrupt Memory.LcdStatInterrupt newMem
-        
-        // Mode 0 H-Blank Interrupt
-        if newPpuState.Mode = HBlank && oldPpuMode <> HBlank && ((currentStat &&& 0x08uy) <> 0uy) then
+        // STAT 割り込み: 有効な条件の OR が 0→1 になった瞬間に要求する。
+        // モード遷移だけで判定すると、ゲームが $FF41 を書き換えて条件が成立した場合
+        // (実機は書き込みでも割り込みが上がる) を取り逃す。OR で見ることで同じ経路で拾える。
+        let statMode = newPpuState.Mode
+        let statLine =
+            ((currentStat &&& 0x08uy) <> 0uy && statMode = HBlank)
+            || ((currentStat &&& 0x10uy) <> 0uy && statMode = VBlank)
+            || ((currentStat &&& 0x20uy) <> 0uy && statMode = OamScan)
+            || ((currentStat &&& 0x40uy) <> 0uy && lycEqLy)
+
+        if statLine && not newPpuState.StatLine then
             newMem <- Memory.requestInterrupt Memory.LcdStatInterrupt newMem
 
-        // Mode 1 V-Blank Interrupt (STAT, not general V-Blank)
-        if newPpuState.Mode = VBlank && oldPpuMode <> VBlank && ((currentStat &&& 0x10uy) <> 0uy) then
-            newMem <- Memory.requestInterrupt Memory.LcdStatInterrupt newMem
-        
-        // Mode 2 OAM Interrupt
-        if newPpuState.Mode = OamScan && oldPpuMode <> OamScan && ((currentStat &&& 0x20uy) <> 0uy) then
-            newMem <- Memory.requestInterrupt Memory.LcdStatInterrupt newMem
+        // 次ステップのエッジ判定用に今回の線の状態を保存する (上の判定が済んだあと)
+        newPpuState <- { newPpuState with StatLine = statLine }
 
         // LYレジスタをメモリに書き込む
         newMem <- Memory.write LY (newPpuState.LY) newMem
