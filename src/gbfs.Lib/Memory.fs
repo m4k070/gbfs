@@ -730,12 +730,19 @@ module Memory =
       | 0xFF51 | 0xFF52 | 0xFF53 | 0xFF54 -> // HDMA1-4: 転送元/転送先アドレス (CGB 専用)
         if mem.CgbMode then mem.Io.[a - 0xFF00] <- value
         mem
-      | 0xFF55 -> // HDMA5: bit7 = 0 → GDMA (即時転送) / bit7 = 1 → HDMA (1 ラインずつ)
+      | 0xFF55 -> // HDMA5: bit7 = 0 → GDMA (即時転送) / 1 → HDMA (1 ラインずつ)
         if not mem.CgbMode then
           mem
         elif (value &&& 0x80uy) <> 0uy then
           // bit7 = 0 にして「転送中」を表す (読み出しで bit7 = 0 = 進行中)
           mem.Io.[0x55] <- value &&& 0x7Fuy
+          mem
+        elif hdmaActive mem then
+          // 転送中に bit7 = 0 を書いた場合は「手動終了 (中断)」。
+          // Pan Docs: bit7 を 0 にした書き込みは HBlank 転送を停止する。
+          // ここで GDMA を走らせてはいけない (余分なブロックを VRAM に書いてしまう)。
+          // 残りブロック数 (bit0-6) はそのままに、bit7 = 1 (非アクティブ) にする。
+          mem.Io.[0x55] <- mem.Io.[0x55] ||| 0x80uy
           mem
         else
           gdmaTransfer ((int value &&& 0x7F) + 1) mem
