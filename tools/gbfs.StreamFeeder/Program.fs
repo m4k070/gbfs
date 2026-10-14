@@ -23,6 +23,16 @@ open System.IO
 open System.Threading
 open System.Collections.Concurrent
 
+/// feeder が実行するアクション
+type Act =
+    /// ボタンを frames フレーム押す
+    | Press of button: string * frames: int
+    /// その方向へ、座標が実際に tiles マスぶん変わるまで押し続ける。
+    /// 「hold N フレーム = 何マス」という較正に依存せず、実際の座標変化で止める。
+    | Walk of button: string * tiles: int
+    /// 何も押さずに frames フレーム待つ
+    | Wait of frames: int
+
 [<EntryPoint>]
 let main argv =
     let args = argv |> Array.filter (fun a -> a <> "--")
@@ -61,6 +71,13 @@ let main argv =
         | Some k when k + 1 < args.Length -> args.[k + 1]
         | _ -> "/tmp/gbfs-save.state.json"
 
+    // 移動履歴の追記先 (JSON Lines)。地図作成と移動量の検証に使う。
+    let tracePath =
+        let i = args |> Array.tryFindIndex (fun a -> a = "--trace")
+        match i with
+        | Some k when k + 1 < args.Length -> args.[k + 1]
+        | _ -> "/tmp/gbfs-trace.jsonl"
+
     Memory.setRtcClock (fun () -> 1_700_000_000L)
 
     let mutable st =
@@ -68,6 +85,13 @@ let main argv =
         | Some f ->
             State.loadFrom f (Emulator.loadRomWithSave rom (Emulator.createWithMachine Memory.Cgb))
         | None -> Emulator.loadRomWithSave rom (Emulator.createWithMachine Memory.Cgb)
+
+    // Gen2 の座標とマップ: $D4D9/$D4DA = プレイヤーのタイル座標, $D4D1 = 向き (0=下 4=上 8=左 12=右),
+    // $DCB5/$DCB6 = 現在のマップ (group, number)。
+    let rdA (a: int) = int (Memory.read (uint16 a) st.Cpu.Mem)
+    let px () = rdA 0xD4D9
+    let py () = rdA 0xD4DA
+    let facing () = rdA 0xD4D1
 
     // 映像の出力は fd 1 を素の FileStream で開く。Console.OpenStandardOutput() は
     // 部分書き込み (short write) を書き切り保証しないため、パイプが詰まると PNG 列が壊れる。
@@ -140,11 +164,24 @@ let main argv =
 
     // stdin のコマンドは「アクション列」として 1 つずつ順番に実行する。
     // 一度に複数行を流し込んでも取りこぼさない (各行は前の行が終わってから始まる)。
-    let actions = Queue<string * int>()   // (button, frames)。button が "-" なら待つだけ
+    let actions = Queue<Act>()
+    let mutable curAct: Act option = None
     let mutable curButton = ""
     let mutable curLeft = 0
+    let mutable walkDone = 0          // walk で実際に動けたマス数 (座標の変化で数える)
+    let mutable walkStill = 0         // 動けないまま経過したフレーム数
+    let mutable prevXY = (0, 0)
+    let mutable seg = 0               // マップ区間。座標が大きく飛んだら (マップ移動) 次の区間
     let sw = Stopwatch.StartNew()
     let mutable n = 0L
+
+    // 移動履歴 (座標が変わったときだけ 1 行追記する)
+    let traceWriter = new StreamWriter(tracePath, true)
+    traceWriter.AutoFlush <- true
+    let tracePos (note: string) =
+        traceWriter.WriteLine(
+            sprintf "{\"t\":%d,\"seg\":%d,\"x\":%d,\"y\":%d,\"dir\":%d,\"note\":\"%s\"}"
+                n seg (px ()) (py ()) (facing ()) note)
 
     let writeVideo () =
         if usePng then
@@ -185,6 +222,8 @@ let main argv =
     drainAudio ()
     writeVideo ()
     n <- 1L
+    prevXY <- (px (), py ())
+    tracePos "start"
 
     // ペース制御: 絶対時刻の期限に合わせる。Thread.Sleep は 1ms 単位でしか眠れず
     // 数十 µs 遅れるため、期限の 1.5ms 手前までは Sleep、そこからは spin で詰める。
@@ -205,26 +244,77 @@ let main argv =
             elif trimmed = "save" then
                 saveState ()
             else
-                let parts = trimmed.Split(':')
-                if parts.Length = 2 then
-                    let b = parts.[0].Trim()
-                    match Int32.TryParse(parts.[1].Trim()) with
-                    | true, frames when frames > 0 ->
-                        actions.Enqueue((if b = "" then "-" else b), frames)
+                let parts = trimmed.Split(' ')
+                if parts.Length = 3 && parts.[0].Trim() = "walk" then
+                    // walk <方向> <マス数>: 座標が実際にそのマス数ぶん変わるまで押し続ける
+                    match Int32.TryParse(parts.[2].Trim()) with
+                    | true, k when k > 0 -> actions.Enqueue(Walk(parts.[1].Trim(), k))
                     | _ -> ()
-        // 進行中のアクションが終わったら次を取り出す
-        if curLeft = 0 then
-            if curButton <> "" then
-                st <- Emulator.releaseButton curButton st
-                curButton <- ""
-            if actions.Count > 0 then
-                let (b, f) = actions.Dequeue()
-                if b <> "-" then
-                    st <- Emulator.pressButton b st
-                    curButton <- b
-                curLeft <- f
+                else
+                    let parts2 = trimmed.Split(':')
+                    if parts2.Length = 2 then
+                        let b = parts2.[0].Trim()
+                        match Int32.TryParse(parts2.[1].Trim()) with
+                        | true, frames when frames > 0 ->
+                            actions.Enqueue(if b = "" || b = "-" then Wait frames else Press(b, frames))
+                        | _ -> ()
         st <- Emulator.runFrame st
-        if curLeft > 0 then curLeft <- curLeft - 1
+
+        // 座標の変化を監視する (walk の判定と移動履歴の記録)
+        let xy = (px (), py ())
+        // マップ遷移中はオブジェクト座標が (0,0) に落ちるので、無効値として無視する
+        // (これを移動と数えると walk が止まらず、ドアを入り続ける等の誤動作になる)
+        if xy <> (0, 0) then
+            if xy <> prevXY then
+                // 大きな座標ジャンプ = マップ移動 (各マップは固有の原点を持つ) として区間を分ける
+                let (ox, oy) = prevXY
+                if abs (fst xy - ox) > 16 || abs (snd xy - oy) > 16 then seg <- seg + 1
+                tracePos ""
+                prevXY <- xy
+                match curAct with
+                | Some (Walk _) -> walkDone <- walkDone + 1
+                | _ -> ()
+            else
+                match curAct with
+                | Some (Walk _) -> walkStill <- walkStill + 1
+                | _ -> ()
+
+        // 進行中のアクションの終了判定
+        match curAct with
+        | Some (Press _)
+        | Some (Wait _) ->
+            curLeft <- curLeft - 1
+            if curLeft <= 0 then
+                if curButton <> "" then
+                    st <- Emulator.releaseButton curButton st
+                    curButton <- ""
+                curAct <- None
+        | Some (Walk(b, need)) ->
+            if walkDone >= need || walkStill > 120 then
+                st <- Emulator.releaseButton curButton st
+                tracePos (
+                    if walkDone >= need then sprintf "walk %s x%d done" b walkDone
+                    else sprintf "walk %s blocked x%d" b walkDone)
+                curButton <- ""
+                curAct <- None
+        | None -> ()
+
+        // 次のアクションを始める
+        if curAct.IsNone && actions.Count > 0 then
+            let a = actions.Dequeue()
+            curAct <- Some a
+            match a with
+            | Press(b, f) ->
+                st <- Emulator.pressButton b st
+                curButton <- b
+                curLeft <- f
+            | Walk(b, _) ->
+                st <- Emulator.pressButton b st
+                curButton <- b
+                walkDone <- 0
+                walkStill <- 0
+                prevXY <- (px (), py ())
+            | Wait f -> curLeft <- f
         writeVideo ()
         drainAudio ()
         n <- n + 1L
