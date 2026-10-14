@@ -1,0 +1,875 @@
+<?xml version="1.0" encoding="utf-8"?>
+<doc>
+<assembly><name>gbfs.Lib</name></assembly>
+<members>
+<member name="T:gbfs.Lib.CpuCore">
+<summary>
+ Swappable CPU implementation (record of functions).
+ NOT serializable — use `CpuKind` for state transfer, then resolve with `cpuImplOf`.
+</summary>
+</member>
+<member name="T:gbfs.Lib.CpuKind">
+<summary>
+ Serializable CPU kind tag.
+ Survives Blazor SSR prerendering → client rehydration.
+</summary>
+</member>
+<member name="P:gbfs.Lib.Memory.MemoryBus.ObjPalette">
+<summary>
+ CGB の OBJ パレット RAM (同上)
+</summary>
+</member>
+<member name="P:gbfs.Lib.Memory.MemoryBus.BgPalette">
+<summary>
+ CGB の BG パレット RAM (8 パレット × 4 色 × 2 バイト = RGB555 リトルエンディアン)
+</summary>
+</member>
+<member name="P:gbfs.Lib.Memory.MemoryBus.SerialBits">
+<summary>
+ シリアル転送の残りビット数 (0 = 転送中でない)。
+ ビット境界は分周カウンタの位相で決まるため、残り時間ではなくビット数で持つ
+</summary>
+</member>
+<member name="P:gbfs.Lib.Memory.MemoryBus.DmaRequest">
+<summary>
+ OAM DMA (0xFF46) の転送要求。0xFF46 への書き込みで立ち、PPU が転送して消費する。
+ レジスタ値だけで判定すると電源投入直後の 0xFF46 = 0xFF で誤って転送してしまう
+</summary>
+</member>
+<member name="P:gbfs.Lib.Memory.MemoryBus.CgbMode">
+<summary>
+ CGB モードが解禁されているか (マシンが CGB かつ ヘッダ 0x0143 bit7 = 1)。ROM ロード時に確定する。
+ false のとき CGB 専用レジスタは 0xFF を読み、書き込みを無視する
+ (Pan Docs: CGB Registers &quot;you must first unlock CGB features by changing byte 0143&quot;)
+</summary>
+</member>
+<member name="P:gbfs.Lib.Memory.MemoryBus.Machine">
+<summary>
+ マシン種別 (電源投入直後の初期値に影響する)
+</summary>
+</member>
+<member name="T:gbfs.Lib.Memory.MachineMode">
+<summary>
+ マシン種別。CGB でもカートが CGB 非対応 (ヘッダ 0x0143 bit7 = 0) なら
+ DMG 互換モードで動き、CGB 専用レジスタは 0xFF を読む (Pan Docs: CGB Registers)。
+</summary>
+</member>
+<member name="P:gbfs.Lib.Memory.MbcState.HasBattery">
+<summary>
+ バッテリーバックアップ付き (ROM ヘッダ 0x0147) — .sav の保存対象
+</summary>
+</member>
+<member name="P:gbfs.Lib.Memory.MbcState.IsMulticart">
+<summary>
+ MBC1M (マルチカート配線)。2bit レジスタが ROM bank の bit4-5 に入る
+</summary>
+</member>
+<member name="P:gbfs.Lib.Memory.MbcState.BankingMode">
+<summary>
+ MBC1: 0=simple, 1=advanced (0x6000-0x7FFF)
+</summary>
+</member>
+<member name="P:gbfs.Lib.Memory.MbcState.RamBank">
+<summary>
+ RAM bank (MBC3: 0x00-0x07 RAM / 0x08-0x0C RTC レジスタ選択 / MBC1: 上位 ROM bank 2bit)
+</summary>
+</member>
+<member name="P:gbfs.Lib.Memory.MbcState.RomBank">
+<summary>
+ ROM bank レジスタの生値 (MBC1:5bit / MBC2:4bit / MBC3:7bit / MBC5:9bit)。
+ MBC1 の 00→01 変換は読み出し時に行う (Pan Docs: 変換判定は 5bit 全域を見る)
+</summary>
+</member>
+<member name="P:gbfs.Lib.Memory.RtcState.LatchedRegs">
+<summary>
+ ラッチ済みレジスタ (S, M, H, DL, DH)。読み出しはこのスナップショットだけを返す
+</summary>
+</member>
+<member name="P:gbfs.Lib.Memory.RtcState.LatchPrev">
+<summary>
+ 0x6000-0x7FFF への直前の書き込み値 (0→1 でラッチ)
+</summary>
+</member>
+<member name="P:gbfs.Lib.Memory.RtcState.HaltedSeconds">
+<summary>
+ Halt 開始時の通算秒
+</summary>
+</member>
+<member name="P:gbfs.Lib.Memory.RtcState.Halted">
+<summary>
+ DH bit6 (Halt)。true の間は時間が止まる
+</summary>
+</member>
+<member name="P:gbfs.Lib.Memory.RtcState.BaseAt">
+<summary>
+ BaseSeconds を観測した実時刻 (unix 秒)
+</summary>
+</member>
+<member name="P:gbfs.Lib.Memory.RtcState.BaseSeconds">
+<summary>
+ RTC 通算秒の基準値
+</summary>
+</member>
+<member name="T:gbfs.Lib.Memory.RtcState">
+<summary>
+ MBC3 の RTC。実時間 (unix 秒) を基準値に加算してレジスタ値を導出する簡易モデル。
+ 実機と同じく電源断の間も時計が進む (バッテリー搭載カートの挙動) ので .sav には保存しない。
+</summary>
+</member>
+<member name="T:gbfs.Lib.Memory.MbcType">
+<summary>
+ ゲームボーイ メモリマップ
+ 0x0000-0x3FFF: ROM Bank 0 (16KB)
+ 0x4000-0x7FFF: ROM Bank 1-N (switchable, 16KB)
+ 0x8000-0x9FFF: VRAM (8KB)
+ 0xA000-0xBFFF: External RAM (8KB)
+ 0xC000-0xDFFF: Work RAM (8KB)
+ 0xE000-0xFDFF: Echo RAM (mirror of C000-DDFF)
+ 0xFE00-0xFE9F: OAM (Sprite Attribute Table)
+ 0xFEA0-0xFEFF: Not usable
+ 0xFF00-0xFF7F: I/O Registers
+ 0xFF80-0xFFFE: High RAM (HRAM)
+ 0xFFFF: Interrupt Enable Register
+ カートリッジのメモリバンクコントローラ種別 (ROM ヘッダ 0x0147 で決まる)
+</summary>
+</member>
+<member name="M:gbfs.Lib.Memory.tickSerial(System.Int32,System.Int32,gbfs.Lib.Memory.MemoryBus)">
+<summary>
+ シリアル転送を cycles 分進める。ビット境界は分周カウンタ (DIV の元) の立ち下がり
+ エッジで決まる。mooneye acceptance/serial/boot_sclk_align の仕様:
+ 「serial clock is divided from the main clock with a big counter, so clock edges align
+   based on the reset time, not the time when SC is written to」
+ (転送は即座には始まらず、次のエッジから始まる)。
+ 完了したら「相手なし」として SB = 0xFF / SC bit7 = 0 / シリアル割込み (IF bit3) を要求する。
+ 外部クロック (SC bit0 = 0) の転送は相手が必要なので開始しない (SerialBits は 0 のまま)
+</summary>
+</member>
+<member name="M:gbfs.Lib.Memory.hdmaStep(gbfs.Lib.Memory.MemoryBus)">
+<summary>
+ HDMA の 1 ライン分 (16 バイト) を転送する。HBlank 開始時に PPU から呼ばれる。
+ 残りが 0 になったら 0xFF55 を 0xFF (非アクティブ) に戻す。
+</summary>
+</member>
+<member name="M:gbfs.Lib.Memory.gdmaTransfer(System.Int32,gbfs.Lib.Memory.MemoryBus)">
+<summary>
+ GDMA: 指定ブロック数を即座に転送して完了させる (0xFF55 に bit7 = 0 を書いたとき)
+</summary>
+</member>
+<member name="M:gbfs.Lib.Memory.hdmaTransferBlock(gbfs.Lib.Memory.MemoryBus)">
+<summary>
+ 16 バイト 1 ブロックを ROM/RAM から VRAM (現在の VBK バンク) へ転送し、両アドレスを進める
+</summary>
+</member>
+<member name="M:gbfs.Lib.Memory.hdmaActive(gbfs.Lib.Memory.MemoryBus)">
+<summary>
+ HDMA が転送中か (0xFF55 の bit7 = 0 かつ CGB モード)
+</summary>
+</member>
+<member name="M:gbfs.Lib.Memory.hdmaDestAddress(gbfs.Lib.Memory.MemoryBus)">
+<summary>
+ HDMA/GDMA の転送先アドレス。VRAM ($8000-$9FF0) 内で、上位 3 ビットは無視される
+</summary>
+</member>
+<member name="M:gbfs.Lib.Memory.hdmaSourceAddress(gbfs.Lib.Memory.MemoryBus)">
+<summary>
+ HDMA/GDMA の転送元アドレス。0xFF52 の下位 4 ビットは無視される (16 バイト境界)
+</summary>
+</member>
+<member name="P:gbfs.Lib.Memory.writeObserver">
+<summary>
+ 診断用: 書き込みアドレスと値を観測するフック (既定は無効)
+</summary>
+</member>
+<member name="P:gbfs.Lib.Memory.readObserver">
+<summary>
+ 診断用: 読み出しアドレスを観測するフック (既定は無効)。
+ 実 ROM が「どのレジスタを待っているか」を特定するために使う。テストや通常実行では触らない
+</summary>
+</member>
+<member name="M:gbfs.Lib.Memory.objPaletteColor(System.Int32,System.Int32,gbfs.Lib.Memory.MemoryBus)">
+<summary>
+ OBJ パレットの色 (CGB モードのみ意味を持つ)
+</summary>
+</member>
+<member name="M:gbfs.Lib.Memory.bgPaletteColor(System.Int32,System.Int32,gbfs.Lib.Memory.MemoryBus)">
+<summary>
+ BG パレットの色 (CGB モードのみ意味を持つ)
+</summary>
+</member>
+<member name="M:gbfs.Lib.Memory.paletteColor(System.Byte[],System.Int32,System.Int32)">
+<summary>
+ CGB のパレット RAM から RGB555 の色を取り出す (Pan Docs: Color Palettes)。
+ パレット RAM は 8 パレット × 4 色 × 2 バイトで、色は RGB555 のリトルエンディアン。
+</summary>
+</member>
+<member name="M:gbfs.Lib.Memory.readVramBank0(System.UInt16,gbfs.Lib.Memory.MemoryBus)">
+<summary>
+ PPU 用: 常に VRAM バンク 0 を読む。
+ CGB のタイルデータとタイルマップはバンク 0、属性はバンク 1 にあり、
+ PPU のアクセスは CPU の VBK とは独立している。
+</summary>
+</member>
+<member name="M:gbfs.Lib.Memory.wramBank(gbfs.Lib.Memory.MemoryBus)">
+<summary>
+ D000-DFFF に割り当てる WRAM バンク。非 CGB モードではバンク 1 固定。
+ SVBK (0xFF70) の値 0 はバンク 1 として扱う (Pan Docs: CGB Registers / SVBK)
+</summary>
+</member>
+<member name="M:gbfs.Lib.Memory.vramIndex(System.Int32,System.Int32)">
+<summary>
+ VRAM の読み書き。CGB は 2 バンク (0 = タイル/マップ, 1 = 属性)。
+ 非 CGB モードでは VBK の書き込みが無視されるため bank は常に 0 になる。
+</summary>
+</member>
+<member name="M:gbfs.Lib.Memory.mbc1RamBank(gbfs.Lib.Memory.MemoryBus)">
+<summary>
+ MBC1 の RAM bank (mode 0 では常に bank 0 に固定される)
+</summary>
+</member>
+<member name="M:gbfs.Lib.Memory.mbc1mBank(System.Int32,System.Int32)">
+<summary>
+ MBC1M のバンク: 2bit レジスタは bit4-5 に入り、5bit レジスタの bit4 は無視される
+ (00→01 変換の判定だけは 5bit 全域で行う)
+</summary>
+</member>
+<member name="M:gbfs.Lib.Memory.mbc1Bank(System.Int32,System.Int32)">
+<summary>
+ MBC1 の 0x4000-0x7FFF バンク: (2bit レジスタ &lt;&lt; 5) + 変換済み 5bit レジスタ
+</summary>
+</member>
+<member name="M:gbfs.Lib.Memory.maskBank(gbfs.Lib.Memory.MemoryBus,System.Int32)">
+<summary>
+ カートのバンク数に合わせたマスク (Pan Docs: 余分な上位ビットは無視される)
+</summary>
+</member>
+<member name="M:gbfs.Lib.Memory.create">
+<summary>
+ DMG マシン (既定) のメモリを作る
+</summary>
+</member>
+<member name="M:gbfs.Lib.Memory.cgbBootB(System.Byte[])">
+<summary>
+ CGB マシンでの B レジスタ初期値 (Pan Docs &quot;Power-Up Sequence&quot; 脚注 3)。
+ 旧ライセンスコードが 0x01、または 0x33 かつ新ライセンスコードが &quot;01&quot; (= 任天堂) なら
+ タイトル 16 バイト (0x0134-0x0143) の総和、それ以外は 0x00。
+ (mooneye misc/boot_regs-cgb はライセンス &quot;ZZ&quot; なので 0x00 を期待する)
+</summary>
+</member>
+<member name="M:gbfs.Lib.Memory.postBootIoFor(gbfs.Lib.Memory.MachineMode)">
+<summary>
+ 電源投入直後 (ブート ROM 完了時点 = PC 0x0100) の I/O レジスタ初期値。
+ DMG: Pan Docs &quot;Power-Up Sequence&quot; の DMG/MGB 列。同表の根拠は
+      mooneye-test-suite acceptance/boot_hwio-dmgABCmgb (実機で検証済み)。
+ CGB: mooneye-test-suite misc/boot_hwio-C (実機の CGB で検証済み)。
+      同 ROM のヘッダは 0x0143 = 0x00 なので CGB の DMG 互換モードの値であり、
+      CGB 専用レジスタは 0xFF を読む。
+ 未使用レジスタはどちらも 0xFF。
+</summary>
+</member>
+<member name="M:gbfs.Lib.Memory.detectMulticart(gbfs.Lib.Memory.MbcType,System.Byte[])">
+<summary>
+ MBC1M (マルチカート) 判定: ROM bank $10 の先頭にも Nintendo ロゴ (0x0104-0x0133) があるか
+ (Pan Docs MBC1「MBC1M multi-game compilation carts」節)
+</summary>
+</member>
+<member name="M:gbfs.Lib.Memory.detectBattery(System.Byte[])">
+<summary>
+ ROM ヘッダ 0x0147 がバッテリーバックアップ付きかを示す
+</summary>
+</member>
+<member name="M:gbfs.Lib.Memory.detectMbcType(System.Byte[])">
+<summary>
+ ROM ヘッダ 0x0147 のマッパー種別 (Pan Docs: The Cartridge Header)
+</summary>
+</member>
+<member name="M:gbfs.Lib.Memory.rtcSetRegister(System.Int32,System.Byte,gbfs.Lib.Memory.RtcState)">
+<summary>
+ RTC レジスタ (0x08-0x0C) への書き込み。書き込んだ値を基準にカウンタを再設定する。
+</summary>
+</member>
+<member name="M:gbfs.Lib.Memory.rtcLatch(gbfs.Lib.Memory.RtcState)">
+<summary>
+ 現在時刻をラッチ済みレジスタへ取り込む (Halt / Carry ビットを DH に反映)
+</summary>
+</member>
+<member name="M:gbfs.Lib.Memory.rtcDecode(System.Int64)">
+<summary>
+ 通算秒 → (S, M, H, DL, DH bit0), 日カウンタ桁溢れ
+</summary>
+</member>
+<member name="M:gbfs.Lib.Memory.setRtcClock(Microsoft.FSharp.Core.FSharpFunc{Microsoft.FSharp.Core.Unit,System.Int64})">
+<summary>
+ テスト用: RTC の基準時刻を固定する
+</summary>
+</member>
+<member name="P:gbfs.Lib.Memory.rtcClock">
+<summary>
+ RTC の現在時刻 (unix 秒)。テストで差し替えられるよう mutable にしてある。
+</summary>
+</member>
+<member name="P:gbfs.Lib.Ppu.PpuState.BgTilePriority">
+<summary>
+ CGB: BG / ウィンドウのタイル属性 bit7 (1 = BG が OBJ より優先)。非 CGB では常に false
+</summary>
+</member>
+<member name="P:gbfs.Lib.Ppu.PpuState.BgColorIndex">
+<summary>
+ BG / ウィンドウの各ピクセルの色番号 (0-3)。OBJ との優先度判定に使う (Issue #21)。
+ FrameBuffer は 4 階調に量子化されるため色番号の代用にはならない (BGP で 0 以外に写りうる)
+</summary>
+</member>
+<member name="P:gbfs.Lib.Ppu.PpuState.RgbFrameBuffer">
+<summary>
+ 実際の色を入れた RGB バッファ (160 * 144 * 3 バイト、R,G,B の順)。
+ CGB はパレット RAM の RGB555 を 8 ビットに伸ばした値、DMG は 4 階調を緑系パレットに写した値。
+ 4 階調の FrameBuffer は DMG 互換と既存テストのために残す (Issue #19)。
+</summary>
+</member>
+<member name="P:gbfs.Lib.Ppu.PpuState.StatLine">
+<summary>
+ 前回のステップで STAT 割り込み線が立っていたか。
+ 実機の STAT 割り込みは「有効な条件の OR」が 0→1 になった瞬間に要求が上がる。
+ モード遷移だけで判定すると、ゲームが $FF41 を書いて条件が成立した場合
+ (実機は書き込みでも割り込みが上がる) を取り逃す。実測で 3.1/フレームの欠落になっていた。
+</summary>
+</member>
+<member name="T:gbfs.Lib.Ppu.PpuMode">
+<summary>
+ Represents a single sprite&apos;s attributes from OAM.
+</summary>
+</member>
+<member name="T:gbfs.Lib.Ppu.Sprite">
+<summary>
+ Represents a single sprite&apos;s attributes from OAM.
+</summary>
+</member>
+<member name="M:gbfs.Lib.Ppu.step(System.Int32,gbfs.Lib.Ppu.PpuState,gbfs.Lib.Memory.MemoryBus)">
+<summary>
+ The PPU step function, called from the main CPU loop.
+ It takes the number of cycles the last CPU instruction took.
+</summary>
+</member>
+<member name="M:gbfs.Lib.Ppu.dmaTransfer(System.Byte,gbfs.Lib.Memory.MemoryBus)">
+<summary>
+ Initiates an OAM DMA transfer.
+ Copies 160 bytes from `sourceAddr` to OAM (0xFE00-0xFE9F).
+</summary>
+</member>
+<member name="M:gbfs.Lib.Ppu.renderScanline(gbfs.Lib.Ppu.PpuState,gbfs.Lib.Memory.MemoryBus)">
+<summary>
+ Renders a single scanline to the framebuffer.
+</summary>
+</member>
+<member name="M:gbfs.Lib.Ppu.renderSprites(gbfs.Lib.Ppu.PpuState,gbfs.Lib.Memory.MemoryBus,System.Byte,System.Byte,System.Byte,Microsoft.FSharp.Collections.FSharpList{gbfs.Lib.Ppu.Sprite})">
+<summary>
+ Renders the given list of sprites onto the framebuffer for the current scanline.
+</summary>
+</member>
+<member name="M:gbfs.Lib.Ppu.readOamSprites(gbfs.Lib.Memory.MemoryBus)">
+<summary>
+ Reads all 40 sprites from OAM and parses their attributes.
+</summary>
+</member>
+<member name="M:gbfs.Lib.Ppu.writeDmgRgb(System.Byte[],System.Int32,System.Byte)">
+<summary>
+ DMG の階調インデックスを RGB バッファに書く
+</summary>
+</member>
+<member name="P:gbfs.Lib.Ppu.dmgRgb">
+<summary>
+ DMG の 4 階調パレット (shade 0 = 最も淡い → 3 = 最も濃い)
+</summary>
+</member>
+<member name="M:gbfs.Lib.Ppu.writeRgb(System.Byte[],System.Int32,System.UInt16)">
+<summary>
+ CGB のパレット色 (RGB555) を RGB バッファの 1 ピクセルに書く
+</summary>
+</member>
+<member name="M:gbfs.Lib.Ppu.expand5(System.Int32)">
+<summary>
+ RGB555 の各成分を 8 ビットに伸ばす (上位ビットを下位に複製する定石)
+</summary>
+</member>
+<member name="M:gbfs.Lib.Ppu.shadeOfRgb(System.UInt16)">
+<summary>
+ RGB555 を 4 階調 (0 = 白 .. 3 = 黒) に量子化する。
+ フレームバッファが 4 階調の byte 配列のため、CGB の色は今のところ輝度で近似する
+ (正確な色は RGB フレームバッファ導入後に出力する)。
+ CGB ゲームは BGP を 0x00 にしたまま CGB パレットを使うため、
+ BGP だけを見ると画面が真っ白になる (実 ROM で確認した症状)
+</summary>
+</member>
+<member name="M:gbfs.Lib.Ppu.readTileAttributes(System.UInt16,gbfs.Lib.Memory.MemoryBus)">
+<summary>
+ CGB の属性バイト (VRAM バンク 1) を読む。非 CGB モードには属性が無いので 0。
+</summary>
+</member>
+<member name="M:gbfs.Lib.Ppu.shouldDrawSpritePixel(gbfs.Lib.Ppu.Sprite,System.Byte,System.Boolean,System.Byte,System.Boolean)">
+<summary>
+ Determines if a sprite pixel should be drawn.
+ CGB は Pan Docs (Tile Maps) の規則: BG の色番号が 0 なら常に OBJ、
+ LCDC bit0 が 0 なら常に OBJ、それ以外は BG 属性 bit7 と OAM 属性 bit7 が
+ 両方 0 のときだけ OBJ。DMG は OAM 属性 bit7 が 1 のとき BG の色番号 0 でのみ描く。
+</summary>
+</member>
+<member name="M:gbfs.Lib.Ppu.getSpriteHeight(System.Byte)">
+<summary>
+ Gets the current sprite height (8 or 16 pixels) based on LCDC register.
+</summary>
+</member>
+<member name="P:gbfs.Lib.Apu.noiseDivisors">
+<summary>
+ Noise channel divisor lookup table
+</summary>
+</member>
+<member name="P:gbfs.Lib.Apu.dutyTable">
+<summary>
+ Duty cycle waveforms (8 steps each)
+ nocash Pan Docs の波形 (`_`=high) の回転で、比率は 12.5/25/50/75%。
+ 0: 12.5%  00000001
+ 1: 25%    10000001
+ 2: 50%    10000111
+ 3: 75%    01111110
+</summary>
+</member>
+<member name="P:gbfs.Lib.Joypad.JoypadState.PreviousInput">
+<summary>
+ Previously read input bits (for interrupt detection)
+</summary>
+</member>
+<member name="P:gbfs.Lib.Joypad.JoypadState.A">
+<summary>
+ Action buttons
+</summary>
+</member>
+<member name="P:gbfs.Lib.Joypad.JoypadState.Right">
+<summary>
+ Direction buttons
+</summary>
+</member>
+<member name="M:gbfs.Lib.Joypad.sync(gbfs.Lib.Joypad.JoypadState,gbfs.Lib.Memory.MemoryBus)">
+<summary>
+ Updates the JOYP register in memory and checks for joypad interrupt.
+ Should be called each step to keep memory in sync with button state.
+</summary>
+</member>
+<member name="M:gbfs.Lib.Joypad.readJoyp(gbfs.Lib.Joypad.JoypadState,gbfs.Lib.Memory.MemoryBus)">
+<summary>
+ Computes the JOYP register value based on the select bits
+ written by the game and the current button state.
+</summary>
+</member>
+<member name="P:gbfs.Lib.Joypad.JOYP">
+<summary>
+ JOYP/P1 register (0xFF00)
+   Bit 7-6: Not used
+   Bit 5:   Select Action buttons    (0=Select)
+   Bit 4:   Select Direction buttons  (0=Select)
+   Bit 3:   Down  or Start   (0=Pressed)
+   Bit 2:   Up    or Select  (0=Pressed)
+   Bit 1:   Left  or B       (0=Pressed)
+   Bit 0:   Right or A       (0=Pressed)
+</summary>
+</member>
+<member name="P:gbfs.Lib.Timer.TimerState.OverflowPending">
+<summary>
+ Whether TIMA overflow occurred (reload TMA next cycle).
+</summary>
+</member>
+<member name="P:gbfs.Lib.Timer.TimerState.PreviousTiBit">
+<summary>
+ Tracks the previous state of the selected TIMA bit for falling-edge detection.
+</summary>
+</member>
+<member name="P:gbfs.Lib.Timer.TimerState.InternalCounter">
+<summary>
+ Internal 16-bit counter. DIV = upper 8 bits (counter &gt;&gt;&gt; 8).
+</summary>
+</member>
+<member name="M:gbfs.Lib.Timer.step(System.Int32,gbfs.Lib.Timer.TimerState,gbfs.Lib.Memory.MemoryBus)">
+<summary>
+ Advances the timer by the given number of CPU cycles.
+ Handles DIV increment, TIMA increment with falling-edge detection,
+ TIMA overflow → TMA reload, and timer interrupt.
+</summary>
+</member>
+<member name="M:gbfs.Lib.Timer.getTimaBit(System.UInt16,System.Byte)">
+<summary>
+ Checks if the selected bit of the internal counter is set.
+</summary>
+</member>
+<member name="M:gbfs.Lib.Timer.getTimaBitPos(System.Byte)">
+<summary>
+ Gets the bit position of the internal counter used for TIMA increment.
+</summary>
+</member>
+<member name="M:gbfs.Lib.Timer.create">
+<summary>
+ DMG マシン (既定) のタイマを作る
+</summary>
+</member>
+<member name="M:gbfs.Lib.Timer.postBootCounterFor(gbfs.Lib.Memory.MachineMode)">
+<summary>
+ 電源投入直後の内部カウンタ値。
+ DIV = 0xAB (DMG) / 0x26 (CGB) は Pan Docs &quot;Power-Up Sequence&quot; の各列の値 (上位バイトが一致)。
+ 低位バイトは mooneye の位相テストが要求する 6 回の読み出し
+ (DMG acceptance/boot_div-dmgABCmgb: AC,AD,AD,AE,AF,B1 /
+  CGB misc/boot_div-cgbABCDE: 27,28,28,29,2A,2C) から逆算した。
+ どちらも PC 0x0100 で nop / jp 0x0150 を実行してから nop 数だけを変えて読み出すので、
+ 読み出し開始時点の累積 T サイクルは DMG: 44/300/552/808/1064/1324、
+ CGB: 128/384/636/892/1148/1408。
+ 6 つの期待値すべてと両立するのは 4 値の窓 (DMG: 0xABD4..0xABD7 / CGB: 0x2680..0x2683) で、
+ テストの「読み出しは DIV 更新直後」という意図に一致する値を採る
+ (DMG: 0xAC01 - 44 = 0xABD5 / CGB: 0x2701 - 128 = 0x2681)。
+ 注意: CGB のブート ROM の長さは実際にはヘッダ内容 (と互換パレット選択) に依存するため
+ (Pan Docs 脚注 5)、この固定値は mooneye のテスト ROM に合わせた近似。
+ Memory.postBootIoFor の DIV (0xFF04) も同じ値に揃えること
+ (Timer.step は Io とカウンタの不一致を「DIV 書き込み」と解釈するため)。
+</summary>
+</member>
+<member name="P:gbfs.Lib.Timer.timaRateBits">
+<summary>
+ The internal 16-bit counter increments every CPU cycle (4194304 Hz).
+ DIV is the upper 8 bits of this counter (increments at 16384 Hz = every 256 cycles).
+ TIMA increment rate is selected by TAC bits 0-1:
+   00: 4096 Hz   (every 1024 cycles) - bit 9 of internal counter
+   01: 262144 Hz (every 16 cycles)   - bit 3 of internal counter
+   10: 65536 Hz  (every 64 cycles)   - bit 5 of internal counter
+   11: 16384 Hz  (every 256 cycles)  - bit 7 of internal counter
+</summary>
+</member>
+<member name="M:gbfs.Lib.Cpu.initRegisterCgb">
+<summary>
+ CGB マシンの起動時の初期値 (Pan Docs &quot;Power-Up Sequence&quot; の CGB (DMG 互換) 列。
+ 根拠は mooneye misc/boot_regs-cgb: A=0x11, F=0x80, B=0x00, C=0x00, D=0x00, E=0x08,
+ H=0x00, L=0x7C, SP=0xFFFE)。
+ B は実際にはヘッダのライセンスコードに依存するため、ROM ロード時に上書きする
+ (Memory.cgbBootB)。
+</summary>
+</member>
+<member name="P:gbfs.Lib.Decoder.CpuState.DmaStall">
+<summary>
+ OAM DMA 中の CPU 停止の残り T サイクル。実機は DMA 転送に 640 T サイクルかかり、
+ その間 CPU は停止するが PPU/APU/Timer はそのまま動き続ける (160 M サイクル = 640 T サイクル)。
+ 0 のとき実行中。以前は PPU 側で「160 を引く」実装になっており、CPU が毎フレーム
+ 160 サイクル余分に走っていた (実測: 1 フレーム 70,384 サイクル / 実機 70,224)。
+</summary>
+</member>
+<member name="P:gbfs.Lib.Decoder.CpuState.Stopped">
+<summary>
+ STOP で速度を切り替えた後の CPU 停止の残り T サイクル
+ (Pan Docs: 2050 M サイクル = 8200 T サイクル)。0 のとき実行中
+</summary>
+</member>
+<member name="P:gbfs.Lib.Decoder.CpuState.HaltBug">
+<summary>
+ HALT バグ (Pan Docs): IME=0 で要因がある状態の HALT は停止せず、PC は HALT 自身を指したまま。
+ 次の命令は PC+1 から読み、PC を基点に実行するので HALT の次のバイトが 2 回読まれる
+</summary>
+</member>
+<member name="P:gbfs.Lib.Decoder.CpuState.ImeScheduled">
+<summary>
+ EI の効果は 1 命令遅れる: EI はこれを立て、次の命令の実行前に Ime へ反映する
+ (その命令の実行後に割込み判定が行われる。EI; DI なら割込みは起きない)
+</summary>
+</member>
+<member name="M:gbfs.Lib.Decoder.step(gbfs.Lib.Decoder.CpuState)">
+<summary>
+ Executes a single step (see `stepWithCycles`), discarding the cycle count
+</summary>
+</member>
+<member name="M:gbfs.Lib.Decoder.stepWithCycles(gbfs.Lib.Decoder.CpuState)">
+<summary>
+ Executes a single step: handles interrupts, HALT state, and instruction execution.
+ 戻り値は (新しい状態, この step で周辺回路を進めたサイクル数 (T サイクル))。
+ テスト ROM ランナー等、経過サイクルを数えたい呼び出し元向け
+</summary>
+</member>
+<member name="M:gbfs.Lib.Decoder.executeInstruction(gbfs.Lib.Decoder.CpuState)">
+<summary>
+ Executes a single instruction and returns the new state with PPU updated
+ 1 命令を実行し、(新しい状態, 消費サイクル数 (T サイクル)) を返す
+</summary>
+</member>
+<member name="M:gbfs.Lib.Decoder.stepPeripherals(System.Int32,gbfs.Lib.Decoder.CpuState)">
+<summary>
+ 周辺回路を cycles (CPU の T サイクル) 分進める。
+ CGB の倍速モードでは CPU・タイマ・シリアル・OAM DMA が 2 倍、LCD と APU は等速で動くため
+ (Pan Docs: CGB Registers / KEY1)、PPU と APU には半分のサイクルを渡す。
+ gbfs の命令サイクルはすべて 4 の倍数なので 2 で割り切れる。
+</summary>
+</member>
+<member name="M:gbfs.Lib.Decoder.handleInterrupt(gbfs.Lib.Decoder.CpuState)">
+<summary>
+ Handles interrupt dispatch. Returns the new state and cycles consumed.
+ If no interrupt is handled, returns None.
+</summary>
+</member>
+<member name="M:gbfs.Lib.Decoder.getPendingInterrupts(gbfs.Lib.Decoder.CpuState)">
+<summary>
+ Checks if any interrupt is pending (IE &amp; IF)
+</summary>
+</member>
+<member name="M:gbfs.Lib.Decoder.createState">
+<summary>
+ DMG マシン (既定) の起動状態
+</summary>
+</member>
+<member name="M:gbfs.Lib.Decoder.createStateFor(gbfs.Lib.Memory.MachineMode,Microsoft.FSharp.Core.Unit)">
+<summary>
+ マシン種別 (DMG / CGB) を指定して起動状態を作る
+</summary>
+</member>
+<member name="T:gbfs.Lib.WireLevelCpu">
+<summary>
+ WireLevel cellular-automaton SM83 CPU bridge.
+
+ ## Background
+
+ WireLevel (../wwc, DESIGN-CA2.md) is a custom CA designed for digital logic
+ compilation. Unlike classic WireWorld (pulse-based, Moore neighborhood),
+ WireLevel is **level-driven, von Neumann neighborhood, ≤64 states** with
+ dedicated gate cells:
+
+ | Cell | Function |
+ |------|----------|
+ | `LPin v` | Host-writable pin, presents level `v` to all neighbors |
+ | `LWire(dir,v)` | Directional wire: reads from back, presents forward |
+ | `LNand(dir,v)` | NAND gate: `v&apos; = NOT(AND(all non-output neighbors))` |
+ | `Cross(hd,vd,hv,vv)` | Independent 2-channel crossing (eliminates routing congestion) |
+ | `LDff(dir,q,prevClk)` | Edge-triggered DFF: `clk ∧ ¬prevClk ⇒ q := D` |
+
+ The SM83 CPU (../wwc) is compiled from Verilog through yosys into WireLevel
+ grids, then executed on GPU via WebGPU compute shaders.
+
+ ## Architecture
+
+ This bridge adapts the WireLevel CPU to the gbfs `CpuCore` interface,
+ enabling it as a drop-in replacement for the native F# CPU.
+
+ ```
+ ┌──────────────┐     pin r/w      ┌─────────────────┐
+ │  Emulator.fs │ ←─────────────→ │ WireLevelCpu     │
+ │  (host CPU)  │   CpuState       │ (GPU CA grid)    │
+ └──────────────┘                  └─────────────────┘
+ ```
+
+ ## Integration Plan (../wwc DESIGN-CA2.md §5.6)
+
+ 1. **Bus Bridge**: WireLevel CPU has `LPin` cells for addr/data/control.
+    Bridge translates pin states ↔ `Memory.read`/`write` on `MemoryBus`.
+    - CPU read cycle:  set data bus pins as input, run to settle, read addr pins → Memory.read → write data pins, run to settle, read data bus
+    - CPU write cycle: set addr + data pins, run to settle, read control pins → Memory.write
+
+ 2. **Interrupt Bridge**: GB peripherals trigger interrupts via IF/IE registers.
+    Bridge writes interrupt request bits to the CPU&apos;s interrupt input `LPin` cells.
+
+ 3. **Timing**: WireLevel is level-driven (settles naturally like real hardware).
+    No strict STA needed — just wait for the grid to reach a fixed point after
+    each pin change. Clock is driven by toggling the CLK `LPin`.
+
+ 4. **State Sync**: After each instruction, read register output `LPin` cells
+    and write values into `CpuState.Regs`.
+
+ ## Current Status
+
+ The WireLevel SM83 CPU exists in two variants:
+ - `sm83_min` (380 gates, 20 instructions, GPU-verified 20/20) — register-only, no memory bus
+ - `sm83_subset` (3553 gates, memory bus) — target for integration, compileWL pending
+
+ The WebGPU runner (`../wwc/wgpu-runner/`) already supports program-driven
+ execution with pin I/O and register dump. The bus bridge is the remaining piece.
+
+ This stub delegates to the native Decoder CPU. Replace `Step`/`CreateState`/`LoadRom`
+ with actual WireLevel grid execution once the bus/interrupt bridge is implemented.
+</summary>
+</member>
+<member name="M:gbfs.Lib.Png.encodeFrameBuffer(System.Int32,System.Int32,System.Byte[])">
+<summary>
+ gbfs の framebuffer (値 0-3 の 4 階調) をグレーに写して PNG にする。
+ 写し方は Desktop UI と同じ (0 = 最も明るい)。
+</summary>
+</member>
+<member name="M:gbfs.Lib.Png.encodeRgb(System.Int32,System.Int32,System.Byte[])">
+<summary>
+ 24bit RGB PNG (pixels は width * height * 3 バイト、R,G,B の順)
+</summary>
+</member>
+<member name="M:gbfs.Lib.Png.encodeGray(System.Int32,System.Int32,System.Byte[])">
+<summary>
+ 8bit グレースケール PNG (pixels は width * height バイト)
+</summary>
+</member>
+<member name="M:gbfs.Lib.Png.zlibStore(System.Byte[])">
+<summary>
+ zlib ストリーム (無圧縮 deflate ブロック + adler32)
+</summary>
+</member>
+<member name="M:gbfs.Lib.Png.chunk(System.String,System.Byte[])">
+<summary>
+ 長さ + タイプ + データ + CRC の 1 チャンク
+</summary>
+</member>
+<member name="T:gbfs.Lib.Png">
+<summary>
+ 依存なしの最小 PNG エンコーダ (8bit グレースケール)。
+ 圧縮は deflate の「無圧縮ブロック」(stored) のみ — 実装が短く、外部ライブラリが要らない。
+ 画面が CGB のカラーになる (issue #19) までは framebuffer の 4 階調をグレーに写して出力する。
+</summary>
+</member>
+<member name="M:gbfs.Lib.Emulator.writeMemory(System.UInt16,System.Byte[],gbfs.Lib.Emulator.EmulatorState)">
+<summary>
+ Write bytes to memory starting at address
+</summary>
+</member>
+<member name="M:gbfs.Lib.Emulator.readMemory(System.UInt16,System.Int32,gbfs.Lib.Emulator.EmulatorState)">
+<summary>
+ Read memory at address for given length
+</summary>
+</member>
+<member name="M:gbfs.Lib.Emulator.getFlags(gbfs.Lib.Emulator.EmulatorState)">
+<summary>
+ Get CPU flags
+</summary>
+</member>
+<member name="M:gbfs.Lib.Emulator.getRegisters(gbfs.Lib.Emulator.EmulatorState)">
+<summary>
+ Get register values as a map
+</summary>
+</member>
+<member name="M:gbfs.Lib.Emulator.clearAudioBuffer(gbfs.Lib.Emulator.EmulatorState)">
+<summary>
+ Clear audio buffer after consuming samples
+</summary>
+</member>
+<member name="M:gbfs.Lib.Emulator.getAudioBuffer(gbfs.Lib.Emulator.EmulatorState)">
+<summary>
+ Get audio samples (L/R interleaved float array)
+</summary>
+</member>
+<member name="M:gbfs.Lib.Emulator.getScreenAsText(gbfs.Lib.Emulator.EmulatorState)">
+<summary>
+ Get the screen as ASCII art (for MCP / text-based consumption)
+</summary>
+</member>
+<member name="M:gbfs.Lib.Emulator.getRgbFrameBuffer(gbfs.Lib.Emulator.EmulatorState)">
+<summary>
+ 実際の色 (RGB888、160 * 144 * 3 バイト) のフレームバッファ。CGB のカラー出力用 (Issue #19)
+</summary>
+</member>
+<member name="M:gbfs.Lib.Emulator.getFrameBuffer(gbfs.Lib.Emulator.EmulatorState)">
+<summary>
+ Get the raw frame buffer (160x144, values 0-3)
+</summary>
+</member>
+<member name="M:gbfs.Lib.Emulator.runFrames(System.Int32,gbfs.Lib.Emulator.EmulatorState)">
+<summary>
+ Run N frames
+</summary>
+</member>
+<member name="M:gbfs.Lib.Emulator.runFrame(gbfs.Lib.Emulator.EmulatorState)">
+<summary>
+ Run for one frame (until VBlank, ~70224 cycles).
+ Detects frame boundary by watching LY wrap from 143+ back to 0.
+</summary>
+</member>
+<member name="M:gbfs.Lib.Emulator.step(gbfs.Lib.Emulator.EmulatorState)">
+<summary>
+ Execute a single CPU step (one instruction or one HALT cycle)
+</summary>
+</member>
+<member name="M:gbfs.Lib.Emulator.saveRam(System.String,gbfs.Lib.Emulator.EmulatorState)">
+<summary>
+ バッテリー付きカートの外部 RAM を .sav に書き出す。書き出したら true。
+</summary>
+</member>
+<member name="M:gbfs.Lib.Emulator.loadRomWithSave(System.String,gbfs.Lib.Emulator.EmulatorState)">
+<summary>
+ ROM を読み込み、バッテリー付きカートなら隣接する .sav を復元する
+</summary>
+</member>
+<member name="M:gbfs.Lib.Emulator.saveRamPath(System.String)">
+<summary>
+ ROM パスに対応する .sav のパス (拡張子だけ差し替え)
+</summary>
+</member>
+<member name="M:gbfs.Lib.Emulator.setSaveRam(System.Byte[],gbfs.Lib.Emulator.EmulatorState)">
+<summary>
+ 外部 RAM を差し替える (ROM の RAM サイズに合わせて切り詰め / 0 埋め)
+</summary>
+</member>
+<member name="M:gbfs.Lib.Emulator.getMapperName(gbfs.Lib.Emulator.EmulatorState)">
+<summary>
+ マッパー名 (ROM / MBC1 / MBC2 / MBC3 / MBC5)
+</summary>
+</member>
+<member name="M:gbfs.Lib.Emulator.hasBattery(gbfs.Lib.Emulator.EmulatorState)">
+<summary>
+ この ROM がバッテリーバックアップを持つか (ROM ヘッダ 0x0147)
+</summary>
+</member>
+<member name="M:gbfs.Lib.Emulator.getSaveRam(gbfs.Lib.Emulator.EmulatorState)">
+<summary>
+ カートリッジの外部 RAM (バッテリー付きカートなら .sav の保存対象)
+</summary>
+</member>
+<member name="M:gbfs.Lib.Emulator.createWithMachine(gbfs.Lib.Memory.MachineMode)">
+<summary>
+ マシン種別 (DMG / CGB) を指定してエミュレータを作る。
+ 実 CGB カートを動かすときは Memory.Cgb を渡す
+ (カート側の CGB 対応はヘッダ 0x0143 bit7 で判定され、CGB モードが解禁される)
+</summary>
+</member>
+<member name="M:gbfs.Lib.Emulator.createWith(gbfs.Lib.CpuKind)">
+<summary>
+ Create a new emulator state with the specified CPU kind.
+</summary>
+</member>
+<member name="M:gbfs.Lib.Emulator.create">
+<summary>
+ Create a new emulator state with the native F# SM83 CPU.
+</summary>
+</member>
+<member name="M:gbfs.Lib.Emulator.implOf(gbfs.Lib.Emulator.EmulatorState)">
+<summary>
+ Resolve the CPU implementation for this state.
+</summary>
+</member>
+<member name="T:gbfs.Lib.CpuImpl">
+<summary>
+ Resolve a CpuKind tag to its concrete CpuCore implementation.
+</summary>
+</member>
+<member name="M:gbfs.Lib.State.loadFrom(System.String,gbfs.Lib.Emulator.EmulatorState)">
+<summary>
+ ファイルから状態を復元する。current は ROM をロード済みの state
+</summary>
+</member>
+<member name="M:gbfs.Lib.State.saveTo(System.String,gbfs.Lib.Emulator.EmulatorState)">
+<summary>
+ 状態をファイルに書き出し、書いた JSON の長さを返す
+</summary>
+</member>
+<member name="M:gbfs.Lib.State.deserialize(System.String,gbfs.Lib.Emulator.EmulatorState)">
+<summary>
+ current は ROM をロード済みの state。ROM は current のものを引き継ぐ。
+</summary>
+</member>
+<member name="M:gbfs.Lib.State.stripRom(gbfs.Lib.Emulator.EmulatorState)">
+<summary>
+ ROM のバイト列は状態に含めない
+</summary>
+</member>
+<member name="T:gbfs.Lib.State">
+<summary>
+ エミュレータ状態の保存/復元 (開発・検証用)。
+
+ - 形式は System.Text.Json の JSON。
+ - ROM のバイト列は保存しない。状態は ROM 固有なので、復元は「同じ ROM をロード済みの
+   state」に対して行い、ROM はそこから引き継ぐ (2MB を毎回書かないため)。
+ - System.Text.Json は F# の判別共用体をそのまま扱えないため、状態に現れる DU の
+   コンバータをここで登録する。
+</summary>
+</member>
+</members>
+</doc>

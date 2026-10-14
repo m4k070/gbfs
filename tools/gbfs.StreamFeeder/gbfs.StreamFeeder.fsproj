@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>gbfs.StreamFeeder</AssemblyName>
+    <RootNamespace>gbfs.StreamFeeder</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <WarningLevel>3</WarningLevel>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Program.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/gbfs.Lib/gbfs.Lib.fsproj" />
+  </ItemGroup>
+
+</Project>
