@@ -432,40 +432,49 @@ module Ppu =
         let lyc = Memory.read LYC newMem
 
         // Process PPU modes and update newPpuState, newMem
-        match newPpuState.Mode with
-        | OamScan ->
-            if newPpuState.Cycles >= 80 then
-                newPpuState <- { newPpuState with Mode = Drawing; Cycles = newPpuState.Cycles - 80 }
+        // LCDC bit7 = 0 (LCD OFF) のとき、実機は PPU が停止し LY は 0 に固定される。
+        // モードは進まず、VBlank 割り込みも発生しない。ここを見落とすと、ゲームが
+        // 建物に入る等で LCD を切った瞬間に VBlank 割り込みが無限に再入し、
+        // 割り込みベクタ ($0038) に張り付いて SP が減り続ける (ハング)。
+        let lcdEnabled = (Memory.read LCDC newMem &&& 0x80uy) <> 0uy
+        if not lcdEnabled then
+            newPpuState <- { newPpuState with LY = 0uy; Mode = HBlank; Cycles = 0 }
+        else
+
+            match newPpuState.Mode with
+            | OamScan ->
+                if newPpuState.Cycles >= 80 then
+                    newPpuState <- { newPpuState with Mode = Drawing; Cycles = newPpuState.Cycles - 80 }
             
-        | Drawing ->
-            if newPpuState.Cycles >= 172 then
-                newPpuState <- renderScanline newPpuState newMem
+            | Drawing ->
+                if newPpuState.Cycles >= 172 then
+                    newPpuState <- renderScanline newPpuState newMem
                 
-                newPpuState <- { newPpuState with Mode = HBlank; Cycles = newPpuState.Cycles - 172 }
+                    newPpuState <- { newPpuState with Mode = HBlank; Cycles = newPpuState.Cycles - 172 }
 
-                // CGB の HDMA は HBlank 開始時に 16 バイト進む (可視ラインのみ)
-                if newPpuState.LY < 144uy then
-                    newMem <- Memory.hdmaStep newMem
+                    // CGB の HDMA は HBlank 開始時に 16 バイト進む (可視ラインのみ)
+                    if newPpuState.LY < 144uy then
+                        newMem <- Memory.hdmaStep newMem
 
-        | HBlank ->
-            if newPpuState.Cycles >= 204 then
-                newPpuState <- { newPpuState with Cycles = newPpuState.Cycles - 204 }
+            | HBlank ->
+                if newPpuState.Cycles >= 204 then
+                    newPpuState <- { newPpuState with Cycles = newPpuState.Cycles - 204 }
                 
-                newPpuState <- { newPpuState with LY = newPpuState.LY + 1uy }
+                    newPpuState <- { newPpuState with LY = newPpuState.LY + 1uy }
 
-                if newPpuState.LY = 144uy then
-                    newPpuState <- { newPpuState with Mode = VBlank }
-                    newMem <- Memory.requestInterrupt Memory.VBlankInterrupt newMem // Always request V-Blank interrupt
-                else
-                    newPpuState <- { newPpuState with Mode = OamScan }
+                    if newPpuState.LY = 144uy then
+                        newPpuState <- { newPpuState with Mode = VBlank }
+                        newMem <- Memory.requestInterrupt Memory.VBlankInterrupt newMem // Always request V-Blank interrupt
+                    else
+                        newPpuState <- { newPpuState with Mode = OamScan }
 
-        | VBlank ->
-            if newPpuState.Cycles >= 456 then
-                newPpuState <- { newPpuState with Cycles = newPpuState.Cycles - 456 }
-                newPpuState <- { newPpuState with LY = newPpuState.LY + 1uy }
+            | VBlank ->
+                if newPpuState.Cycles >= 456 then
+                    newPpuState <- { newPpuState with Cycles = newPpuState.Cycles - 456 }
+                    newPpuState <- { newPpuState with LY = newPpuState.LY + 1uy }
 
-                if newPpuState.LY > 153uy then
-                    newPpuState <- { newPpuState with Mode = OamScan; LY = 0uy }
+                    if newPpuState.LY > 153uy then
+                        newPpuState <- { newPpuState with Mode = OamScan; LY = 0uy }
 
         // Update LYC=LY Flag (Bit 2 of STAT)
         // LY はモードマシンで進んだあとの値で判定する。モードマシンより前に判定すると

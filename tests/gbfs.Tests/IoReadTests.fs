@@ -69,3 +69,48 @@ let ``GDMA 完了後は HDMA1-4 が 0xFF を返す`` () =
     Assert.Equal(0xFFuy, (Emulator.readMemory 0xFF52us 1 s).[0])
     Assert.Equal(0xFFuy, (Emulator.readMemory 0xFF53us 1 s).[0])
     Assert.Equal(0xFFuy, (Emulator.readMemory 0xFF54us 1 s).[0])
+
+/// LCDC bit7 = 0 (LCD OFF) のとき PPU は停止する。実機 (Pan Docs) では LY=0 に固定され、
+/// モードは進まず、VBlank 割り込みも発生しない。ここを見落とすと、ゲームが建物に入る等で
+/// LCD を切った瞬間に VBlank 割り込みが無限再入し、割り込みベクタ ($0038) に張り付いて
+/// SP が減り続ける (実機では起きないハング)。Crystal の研究所入店で実際に発生した。
+[<Fact>]
+let ``LCD OFF 中は PPU が停止し VBlank 割り込みを要求しない`` () =
+    let mutable ppuState = Ppu.create ()
+    let mutable mem = Memory.create ()
+    mem <- Memory.write Ppu.LCDC 0x00uy mem
+    mem <- Memory.write 0xFF0Fus 0x00uy mem
+    // 10 フレーム以上に相当するサイクルを回す
+    for _ = 1 to 200 do
+        let ps, m = Ppu.step 456 ppuState mem
+        ppuState <- ps
+        mem <- m
+    Assert.Equal(0uy, ppuState.LY)
+    Assert.Equal(Ppu.HBlank, ppuState.Mode)
+    let ifReg = Memory.read 0xFF0Fus mem
+    Assert.Equal(0uy, ifReg &&& 0x01uy) // VBlank ビットは立たない
+
+/// LCD を再度有効化すると通常のモード遷移が再開する
+[<Fact>]
+let ``LCD を有効化し直すとモード遷移が再開する`` () =
+    let mutable ppuState = Ppu.create ()
+    let mutable mem = Memory.create ()
+    mem <- Memory.write Ppu.LCDC 0x00uy mem
+    for _ = 1 to 50 do
+        let ps, m = Ppu.step 456 ppuState mem
+        ppuState <- ps
+        mem <- m
+    mem <- Memory.write Ppu.LCDC 0x91uy mem // LCD ON + BG ON
+    let ps1, m1 = Ppu.step 204 ppuState mem // HBlank 完了 → 次ラインの OamScan
+    ppuState <- ps1
+    mem <- m1
+    Assert.Equal(Ppu.OamScan, ppuState.Mode)
+    Assert.Equal(1uy, ppuState.LY)
+    let ps2, m2 = Ppu.step 80 ppuState mem
+    ppuState <- ps2
+    mem <- m2
+    Assert.Equal(Ppu.Drawing, ppuState.Mode)
+    let ps3, m3 = Ppu.step 172 ppuState mem
+    ppuState <- ps3
+    mem <- m3
+    Assert.Equal(Ppu.HBlank, ppuState.Mode)
