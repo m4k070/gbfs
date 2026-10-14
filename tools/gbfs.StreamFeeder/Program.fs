@@ -54,6 +54,13 @@ let main argv =
         | Some k when k + 1 < args.Length -> args.[k + 1]
         | _ -> "/tmp/gbfs-shot.png"
 
+    // stdin から "save" が来たら現在の状態を state JSON として書き出す (再開用)。
+    let savePath =
+        let i = args |> Array.tryFindIndex (fun a -> a = "--save")
+        match i with
+        | Some k when k + 1 < args.Length -> args.[k + 1]
+        | _ -> "/tmp/gbfs-save.state.json"
+
     Memory.setRtcClock (fun () -> 1_700_000_000L)
 
     let mutable st =
@@ -165,6 +172,10 @@ let main argv =
         File.WriteAllBytes(shotPath, Png.encodeRgb (W * 4) (H * 4) (scale4 (Emulator.getRgbFrameBuffer st)))
         Console.Error.WriteLine(sprintf "shot: %s" shotPath)
 
+    let saveState () =
+        let n = State.saveTo savePath st
+        Console.Error.WriteLine(sprintf "save: %s (%d bytes)" savePath n)
+
     // 状態ファイルには未消費の APU バッファが最大 4096 サンプル (= 93ms) 残っていることがある。
     // そのまま流すと配信の頭で音だけ先行するので捨てる。
     st <- Emulator.clearAudioBuffer st
@@ -191,6 +202,8 @@ let main argv =
             let trimmed = cmd.Trim()
             if trimmed = "shot" then
                 saveShot ()
+            elif trimmed = "save" then
+                saveState ()
             else
                 let parts = trimmed.Split(':')
                 if parts.Length = 2 then
