@@ -17,6 +17,7 @@ module gbfs.StreamFeeder.Program
 
 open gbfs.Lib
 open System
+open System.Collections.Generic
 open System.Diagnostics
 open System.IO
 open System.Threading
@@ -45,6 +46,13 @@ let main argv =
         | _ -> None
 
     let usePng = args |> Array.contains "--png"
+
+    // stdin から "shot" が来たら現在の画面を PNG として書き出す (配信中の確認用)。
+    let shotPath =
+        let i = args |> Array.tryFindIndex (fun a -> a = "--shot")
+        match i with
+        | Some k when k + 1 < args.Length -> args.[k + 1]
+        | _ -> "/tmp/gbfs-shot.png"
 
     Memory.setRtcClock (fun () -> 1_700_000_000L)
 
@@ -123,8 +131,11 @@ let main argv =
     let H = 144
     let frameMs = 1000.0 / fps
 
-    let mutable held = ""
-    let mutable remaining = 0
+    // stdin のコマンドは「アクション列」として 1 つずつ順番に実行する。
+    // 一度に複数行を流し込んでも取りこぼさない (各行は前の行が終わってから始まる)。
+    let actions = Queue<string * int>()   // (button, frames)。button が "-" なら待つだけ
+    let mutable curButton = ""
+    let mutable curLeft = 0
     let sw = Stopwatch.StartNew()
     let mutable n = 0L
 
@@ -135,6 +146,24 @@ let main argv =
         else
             out.Write(Emulator.getRgbFrameBuffer st, 0, W * H * 3)
         out.Flush()
+
+    // 等倍 4 倍拡大 (shot コマンド用)
+    let scale4 (src: byte array) =
+        let dst = Array.zeroCreate<byte> (W * 4 * H * 4 * 3)
+        for y in 0 .. H - 1 do
+            for x in 0 .. W - 1 do
+                let s = (y * W + x) * 3
+                for dy in 0 .. 3 do
+                    for dx in 0 .. 3 do
+                        let o = ((y * 4 + dy) * (W * 4) + (x * 4 + dx)) * 3
+                        dst.[o] <- src.[s]
+                        dst.[o + 1] <- src.[s + 1]
+                        dst.[o + 2] <- src.[s + 2]
+        dst
+
+    let saveShot () =
+        File.WriteAllBytes(shotPath, Png.encodeRgb (W * 4) (H * 4) (scale4 (Emulator.getRgbFrameBuffer st)))
+        Console.Error.WriteLine(sprintf "shot: %s" shotPath)
 
     // 状態ファイルには未消費の APU バッファが最大 4096 サンプル (= 93ms) 残っていることがある。
     // そのまま流すと配信の頭で音だけ先行するので捨てる。
@@ -159,25 +188,30 @@ let main argv =
     while true do
         let mutable cmd = ""
         while q.TryDequeue(&cmd) do
-            let parts = cmd.Trim().Split(':')
-            if parts.Length = 2 then
-                let b = parts.[0].Trim()
-                match Int32.TryParse(parts.[1].Trim()) with
-                | true, frames when frames > 0 ->
-                    if held <> "" then
-                        st <- Emulator.releaseButton held st
-                        held <- ""
-                    if b <> "-" && b <> "" then
-                        st <- Emulator.pressButton b st
-                        held <- b
-                    remaining <- frames
-                | _ -> ()
+            let trimmed = cmd.Trim()
+            if trimmed = "shot" then
+                saveShot ()
+            else
+                let parts = trimmed.Split(':')
+                if parts.Length = 2 then
+                    let b = parts.[0].Trim()
+                    match Int32.TryParse(parts.[1].Trim()) with
+                    | true, frames when frames > 0 ->
+                        actions.Enqueue((if b = "" then "-" else b), frames)
+                    | _ -> ()
+        // 進行中のアクションが終わったら次を取り出す
+        if curLeft = 0 then
+            if curButton <> "" then
+                st <- Emulator.releaseButton curButton st
+                curButton <- ""
+            if actions.Count > 0 then
+                let (b, f) = actions.Dequeue()
+                if b <> "-" then
+                    st <- Emulator.pressButton b st
+                    curButton <- b
+                curLeft <- f
         st <- Emulator.runFrame st
-        if remaining > 0 then
-            remaining <- remaining - 1
-            if remaining = 0 && held <> "" then
-                st <- Emulator.releaseButton held st
-                held <- ""
+        if curLeft > 0 then curLeft <- curLeft - 1
         writeVideo ()
         drainAudio ()
         n <- n + 1L
