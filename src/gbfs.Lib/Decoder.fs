@@ -435,36 +435,53 @@ module Decoder =
       if pending = 0uy then
         None
       else
-        // Find the highest priority interrupt (lowest bit number)
-        let (interruptBit, vector) =
-          if (pending &&& 0x01uy) <> 0uy then (0, VBLANK_VECTOR)
-          elif (pending &&& 0x02uy) <> 0uy then (1, LCD_STAT_VECTOR)
-          elif (pending &&& 0x04uy) <> 0uy then (2, TIMER_VECTOR)
-          elif (pending &&& 0x08uy) <> 0uy then (3, SERIAL_VECTOR)
-          else (4, JOYPAD_VECTOR)
+        // 最優先の有効な割込みを選ぶ
+        let pickAndVector (st: CpuState) : (int * uint16) option =
+          let p = getPendingInterrupts st
+          if p = 0uy then None
+          elif (p &&& 0x01uy) <> 0uy then Some (0, VBLANK_VECTOR)
+          elif (p &&& 0x02uy) <> 0uy then Some (1, LCD_STAT_VECTOR)
+          elif (p &&& 0x04uy) <> 0uy then Some (2, TIMER_VECTOR)
+          elif (p &&& 0x08uy) <> 0uy then Some (3, SERIAL_VECTOR)
+          else Some (4, JOYPAD_VECTOR)
 
-        // Clear the interrupt flag
-        let ifReg = readByte IF_ADDR state
-        let newIfReg = ifReg &&& ~~~(1uy <<< interruptBit)
-        let stateWithClearedIF = { state with Mem = Memory.write IF_ADDR newIfReg state.Mem }
+        // PC は上位バイト → 下位バイトの順に push される (上位 = SP-1、下位 = SP-2)。
+        // mooneye acceptance/interrupts/ie_push の仕様: 上位バイトの push 先が IE (0xFFFF) に
+        // なる場合 (SP = 0x0000)、その書き込みで IE が変わり得るため **候補を選び直す**。
+        //  - 候補が残らなければ dispatch は取り消され PC = 0x0000 になる (IF は変更しない)、IME = 0
+        //  - 別の候補が残ればそれをディスパッチする (Round 4: VBLANK が消えて STAT が残る場合)
+        // 下位バイトの push はこの判定より後なので、IE を書いても取り消しにはならない (Round 3)
+        let currentPC = state.Regs.PC
+        let sp1 = state.Regs.SP - 1us
+        let stateHighPushed =
+          { state with
+              Mem = Memory.write sp1 (byte (currentPC >>> 8)) state.Mem
+              Regs = { state.Regs with SP = sp1 } }
 
-        // Push PC to stack and jump to interrupt vector
-        let currentPC = stateWithClearedIF.Regs.PC
-        let newSP = stateWithClearedIF.Regs.SP - 2us
-        let stateWithNewSP = { stateWithClearedIF with Regs = { stateWithClearedIF.Regs with SP = newSP } }
-        let stateWithPushedPC = write16 newSP currentPC stateWithNewSP
-
-        // Jump to interrupt vector and disable IME
-        let finalState = {
-          stateWithPushedPC with
-            Regs = { stateWithPushedPC.Regs with PC = vector }
-            Ime = false
-            ImeScheduled = false
-            Halted = false // Wake from HALT
-            HaltBug = false // EI 直後の HALT バグ: PC は HALT 自身を指しており、それが戻り番地になる
-        }
-
-        Some (finalState, 20) // Interrupt handling takes 20 cycles
+        match pickAndVector stateHighPushed with
+        | None ->
+          let canceled =
+            { stateHighPushed with
+                Regs = { stateHighPushed.Regs with PC = 0x0000us }
+                Ime = false
+                ImeScheduled = false
+                Halted = false
+                HaltBug = false }
+          Some (canceled, 20)
+        | Some (interruptBit, vector) ->
+          let sp2 = sp1 - 1us
+          let lowPushed = Memory.write sp2 (byte (currentPC &&& 0xFFus)) stateHighPushed.Mem
+          let ifReg = readByte IF_ADDR { state with Mem = lowPushed }
+          let newIfReg = ifReg &&& ~~~(1uy <<< interruptBit)
+          let finalState =
+            { stateHighPushed with
+                Mem = Memory.write IF_ADDR newIfReg lowPushed
+                Regs = { stateHighPushed.Regs with SP = sp2; PC = vector }
+                Ime = false
+                ImeScheduled = false
+                Halted = false
+                HaltBug = false }
+          Some (finalState, 20)
 
   // ====================
   // Instruction Execution
