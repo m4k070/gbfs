@@ -292,9 +292,24 @@ let main argv =
         | Some (Walk(b, need)) ->
             if walkDone >= need || walkStill > 120 then
                 st <- Emulator.releaseButton curButton st
-                tracePos (
-                    if walkDone >= need then sprintf "walk %s x%d done" b walkDone
-                    else sprintf "walk %s blocked x%d" b walkDone)
+                // 指示マス数 (want) と実績 (got) を記録する。判定は facing で行う:
+                //   facing が指示方向 = 入力は届いた (壁なので動けない) → blocked
+                //   facing が別方向     = 入力自体が届いていない (戦闘/メニュー等) → ignored
+                let dirOf =
+                    match b with
+                    | "up" -> 4
+                    | "down" -> 0
+                    | "left" -> 8
+                    | "right" -> 12
+                    | _ -> -1
+                let f = facing ()
+                let status =
+                    if walkDone >= need then "done"
+                    elif f = dirOf then "blocked"
+                    else "ignored"
+                Console.Error.WriteLine(
+                    sprintf "walk %s want=%d got=%d %s facing=%d" b need walkDone status f)
+                tracePos (sprintf "walk %s want=%d got=%d %s" b need walkDone status)
                 curButton <- ""
                 curAct <- None
         | None -> ()

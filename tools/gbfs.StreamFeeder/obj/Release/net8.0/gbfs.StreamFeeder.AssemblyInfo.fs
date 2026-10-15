@@ -10,7 +10,7 @@ open System.Reflection
 [<assembly: System.Reflection.AssemblyCompanyAttribute("gbfs.StreamFeeder")>]
 [<assembly: System.Reflection.AssemblyConfigurationAttribute("Release")>]
 [<assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")>]
-[<assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+91f97eb2fca5f6a470643ab96674b60547251c78")>]
+[<assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+a9a650d9a07832b169d01c64795b54c2b1751607")>]
 [<assembly: System.Reflection.AssemblyProductAttribute("gbfs.StreamFeeder")>]
 [<assembly: System.Reflection.AssemblyTitleAttribute("gbfs.StreamFeeder")>]
 [<assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")>]
