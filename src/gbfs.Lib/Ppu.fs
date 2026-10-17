@@ -334,7 +334,7 @@ module Ppu =
                 let bgTileMapBase = if (lcdc &&& 0x08uy) = 0uy then 0x9800us else 0x9C00us
 
                 let y = currentPpuState.LY + scy // Y coordinate in the full background map
-                let mapX = (uint16 x + uint16 scx) &&& 0x01FFus // X coordinate in the full background map
+                let mapX = (uint16 x + uint16 scx) &&& 0x00FFus // BG マップは 256px 幅。SCX との和は 8bit で折り返す
                 
                 let tileMapX = int (mapX / 8us)
                 let tileMapY = int (uint16 y / 8us)
