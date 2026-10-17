@@ -33,3 +33,10 @@ python tools/diffprobe/compare_reglog.py /tmp/g_rt.log /tmp/p_rt.log
 - 画面の色差は **RGB555→888 の展開差** が主: こちらは `(v<<3)|(v>>2)` (標準)、
   PyBoy は `v<<3` (暗い)。**バグではない**
 - パレット RAM ($FF68-$FF6B) は両者 1 バイトも違わない (実測)
+- **PyBoy はブート ROM を実行し、gbfs はしない** → 素の起動では**フレーム番号がずれる**。
+  PyBoy の PC が 0x0100 に達するのは frame 65 (Crystal JP 実測)、intro では offset が 65〜75 で動く。
+  フレーム番号で並べた比較は別の位相を見ているので、**必ず VRAM ハッシュか RGB 残差で対応付けてから**差を語る。
+  色展開差を補正した RGB 残差 (`gbfs_rgb == (pyboy_rgb | pyboy_rgb>>5)`) が最小になるフレームを探すのが速い
+- **SCX/SCY を 1 フレーム 1 サンプルで比べない**: Crystal は STAT ハンドラ ($0552) から 1 ライン 1 回 SCX を書く。
+  フレーム境界の値は位相依存なので、行ごとに見るには $(0552) をフックして LY と組で取る
+  (gbfs 側は `Memory.setWriteObserver` + `Emulator.step` で 0xFF43 への書き込みを PC/LY つきで捕まえる)
