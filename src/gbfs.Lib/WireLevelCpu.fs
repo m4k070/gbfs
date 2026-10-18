@@ -83,6 +83,8 @@ module WireLevelCpu =
             // The bridge adds GB memory bus mapping + interrupt line driving.
             Decoder.step state
 
+        StepCycles = fun state -> Decoder.stepWithCycles state
+
         CreateState = fun () ->
             // TODO(wirelevel): Initialize WireLevel grid from sm83_subset .bin.
             // Load the pre-compiled grid (../wwc/web/sm83_mc_*.bin),
