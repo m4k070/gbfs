@@ -14,7 +14,10 @@ module CpuImpl =
     let ofKind (kind: CpuKind) : CpuCore =
         match kind with
         | Native ->
-            { Step = Decoder.step; CreateState = Decoder.createState; LoadRom = Decoder.loadRomToState }
+            { Step = Decoder.step
+              StepCycles = Decoder.stepWithCycles
+              CreateState = Decoder.createState
+              LoadRom = Decoder.loadRomToState }
         | WireLevel ->
             WireLevelCpu.core
 module Emulator =
@@ -139,26 +142,35 @@ module Emulator =
         let newCpu = (implOf state).Step state.Cpu
         { state with Cpu = newCpu }
 
-    /// Run for one frame (until VBlank, ~70224 cycles).
-    /// Detects frame boundary by watching LY wrap from 143+ back to 0.
+    /// Run for one frame.
+    /// 境界は **LY wrap (LY が 0 に戻る)**。ただし LCD off 中は wrap が起きないので、
+    /// **70,224 PPU ドット**を上限にする (ドットは倍速時に CPU サイクルの半分)。
+    /// ステップ数で数えると 1 フレームが実時間の 4〜5 倍になり、フレーム番号が実時間からずれる。
     let runFrame (state: EmulatorState) =
         let impl = implOf state
+        let frameDots = 70224
         let mutable cpu = state.Cpu
-        let mutable steps = 0
-        let maxSteps = 70224
-        let mutable passedVBlank = false
+        let mutable dots = 0
+        let mutable total = state.TotalCycles
+        let mutable finished = false
 
-        while steps < maxSteps && not passedVBlank do
+        while not finished do
             let oldLY = cpu.Ppu.LY
-            cpu <- impl.Step cpu
-            steps <- steps + 1
-            if oldLY > 0uy && cpu.Ppu.LY = 0uy then
-                passedVBlank <- true
+            let (next, cycles) = impl.StepCycles cpu
+            cpu <- next
+            total <- total + int64 cycles
+            // 倍速時は CPU が 2 倍速いので、PPU が見るドットは半分
+            let fast = cpu.Mem.CgbMode && (cpu.Mem.Io.[0x4D] &&& 0x80uy) <> 0uy
+            dots <- dots + (if fast then cycles / 2 else cycles)
+            // LCD off にすると LY が 0 に戻るので、それは frame 境界ではない (LCDC bit7 を見る)
+            let lcdOn = (cpu.Mem.Io.[0x40] &&& 0x80uy) <> 0uy
+            if (lcdOn && oldLY > 0uy && cpu.Ppu.LY = 0uy) || dots >= frameDots then
+                finished <- true
 
         { state with
             Cpu = cpu
             FrameCount = state.FrameCount + 1
-            TotalCycles = state.TotalCycles + int64 (steps * 4) }
+            TotalCycles = total }
 
     /// Run N frames
     let runFrames (count: int) (state: EmulatorState) =

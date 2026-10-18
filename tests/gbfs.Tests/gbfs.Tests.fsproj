@@ -23,6 +23,7 @@
     <Compile Include="../../tools/TestRomVerdict.fs" Link="TestRomVerdict.fs" />
     <Compile Include="TestRomVerdictTests.fs" />
     <Compile Include="PpuScrollTests.fs" />
+    <Compile Include="FrameBoundaryTests.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 
