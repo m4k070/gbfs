@@ -1,4 +1,102 @@
-== 概要
+= gbfs — F# 製 Game Boy エミュレータ
+:toc:
 
-GameBoy Emulator written by F#
+Game Boy (DMG) / Game Boy Color (CGB) のエミュレータ。コア (`gbfs.Lib`) は純粋な F# で、
+デスクトップ UI と MCP サーバがその上に載る。
 
+== 構成
+
+|===
+| パス | 役割
+
+| `src/gbfs.Lib` | エミュレータ本体 (外部依存なし)。SM83 CPU / PPU / APU / MBC / タイマ / シリアル
+| `src/gbfs.Desktop` | Avalonia のデスクトップ UI (唯一の対話 UI)
+| `src/gbfs.Server` | MCP frame relay (Kestrel, HTTP :5032)。Lib には依存しない
+| `src/gbfs.McpServer` | MCP サーバ (stdio)。AI からの操作 (12 ツール)
+| `tests/gbfs.Tests` | xUnit
+|===
+
+== 必要環境
+
+* Nix (flake) を推奨。`nix develop` で .NET SDK 8 と、Avalonia / OpenAL のネイティブ依存
+  (fontconfig / libxkbcommon / libGL / X11 / openal) が入る
+* `direnv allow` で devShell を有効化できる
+* 素のシェルでは libSkiaSharp が fontconfig / X11 を見つけられず落ちるため、
+  **デスクトップ UI は devShell 経由で実行する**
+
+== ビルドと実行
+
+[source,bash]
+----
+nix develop -c dotnet build
+
+# テスト (現在 365 本)
+nix develop -c dotnet test
+
+# デスクトップ UI。ROM を省略すると cwd の test.gb を読む (Start ボタンで実行開始)
+nix develop -c dotnet run --project src/gbfs.Desktop -- <rom.gb>
+
+# MCP frame relay (http://localhost:5032)
+dotnet run --project src/gbfs.Server
+
+# MCP サーバ (stdio transport)
+dotnet run --project src/gbfs.McpServer
+----
+
+キーボード: 矢印 = D-Pad、Z = A、X = B、Enter = Start、Shift = Select、Space = 実行/停止。
+
+== テスト ROM (blargg / mooneye)
+
+ROM は repo の外 (`../gb-test-roms`) に置く。
+
+[source,bash]
+----
+nix develop -c dotnet build src/gbfs.Lib/gbfs.Lib.fsproj -c Release
+nix develop -c dotnet fsi tools/run_test_roms.fsx -- ../gb-test-roms/blargg/cpu_instrs/individual
+nix develop -c dotnet fsi tools/run_test_roms.fsx -- --machine cgb <rom.gb>   # 既定は dmg
+----
+
+判定ロジックは `tools/TestRomVerdict.fs` (wwc の RTL ハーネスと共有)。
+mooneye の `-C` ROM はヘッダ 0x0143 = 0x00 なので、CGB ハードの DMG 互換モードで走る
+(`--machine cgb` は CGB モードのテスト用)。
+
+== 実装済みの範囲 (2026-10 時点)
+
+* CPU: SM83 の全命令 (CB プレフィックス含む)、割り込み、HALT バグ、OAM DMA の 640 T サイクル停止
+* タイミング: **1 フレーム = 70,224 PPU ドット** (倍速時は CPU 140,448 T サイクル)、
+  CGB の倍速切替 (KEY1 / STOP)
+* PPU: BG / ウィンドウ / スプライト、CGB のカラーパレット RAM、HDMA / GDMA、
+  STAT 割り込み (有効条件の OR のエッジで判定)
+* カートリッジ: MBC1 / 2 / 3 / 5、バッテリー RAM (`.sav`)、RTC
+* APU: 4 チャンネル、44.1 kHz サンプリング
+* シリアル転送 (ビット境界は分周カウンタの位相に同期)
+* MCP の 12 ツール: `load_rom` / `run_frames` / `press_buttons` / `press_sequence` /
+  `get_screen` / `screenshot_png` / `get_state` / `read_memory` /
+  `save_state` / `load_state` / `save_ram` / `reset`。
+  `load_rom` はヘッダ 0x0143 bit7 を見て CGB / DMG を選ぶ
+
+== 参照実装 (PyBoy) との差分検証
+
+`tools/diffprobe/` に、同じ入力列で gbfs と PyBoy を走らせて状態と描画を突き合わせる
+プローブがある (`tools/diffprobe/README.md`)。PyBoy はブート ROM を実行するため、
+素の起動どうしでは **gbfs フレーム N = PyBoy フレーム N+63** で対応する
+(ずれたら gbfs 側のフレーム計数を先に疑う)。
+
+== 既知の制限
+
+* **ブート ROM は実行しない**。CGB はブート完了時点の状態を直接作って PC = 0x0100 から始める
+* **デスクトップ UI は常に DMG で起動する** (CGB カートを動かす経路は未実装)。
+  CGB カートを使うなら MCP サーバ経由
+* `CpuKind.WireLevel` はスタブで、native CPU に委譲している
+* CI は未設定。`.mcp.json` の `cwd` は環境依存の絶対パスなので、使うマシンに合わせて直す
+* Web UI (Bolero) は廃止。`docs/web-api.md` の契約は**設計段階で未実装**
+
+== ドキュメント
+
+* `docs/cgb.md` — CGB (Game Boy Color) 対応
+* `docs/power-on.md` — 電源投入直後のハードウェア状態
+* `docs/cartridges.md` — MBC / バッテリー / RTC の対応と検証状況
+* `docs/state-trigger-driver.md` — ステートトリガ型入力ドライバ
+* `docs/web-api.md` — Web UI API 契約 (設計段階・未実装)
+* `tools/diffprobe/README.md` — PyBoy との差分プローブ
+* `AGENTS.md` — 開発者向けの構成メモ
