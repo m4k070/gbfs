@@ -1,6 +1,5 @@
-src/*/bin/*
-src/*/obj/*
-tests/*/bin/*
-tests/*/obj/*
+# .NET のビルド成果物 (src/ tests/ tools/ のどの階層でも)
+bin/
+obj/
 .direnv
 .serena
